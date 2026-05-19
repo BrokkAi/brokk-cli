@@ -1,11 +1,11 @@
 import json
 import tomllib
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from brokk_code.mcp_config import (
+    _fetch_github_file,
     configure_claude_code_mcp_settings,
     configure_codex_mcp_settings,
     install_claude_mcp_summaries_skill,
@@ -18,10 +18,10 @@ from brokk_code.zed_config import ExistingBrokkCodeEntryError
 
 
 def _mock_fetch_github_file(path: str) -> str:
-    """Read files from the local claude-plugin directory instead of GitHub."""
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    local_path = repo_root / path
-    return local_path.read_text(encoding="utf-8")
+    # Pre-extraction this read from the monorepo's sibling claude-plugin/ dir.
+    # brokk-cli is standalone, so delegate to the production HTTP fetch that
+    # pulls claude-plugin/* from BrokkAi/brokk@master.
+    return _fetch_github_file(path)
 
 
 def test_configure_claude_code_mcp_settings_uses_claude_json(tmp_path, monkeypatch):
