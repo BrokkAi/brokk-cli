@@ -1,122 +1,163 @@
 # Brokk Code
 
-## What this project is for
+Python CLI tooling for Brokk editor integrations, ACP/MCP servers, and headless
+repository automation.
 
-This project is a Python (Textual) terminal UI client for Brokk that launches and manages a local Java executor subprocess. It authenticates using an HTTP bearer token to submit jobs and streams real-time events and tokens to power its interactive chat, context, and task panels.
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.11+
-- Java 21+ (for the Brokk executor)
-
-The Brokk executor JAR will be **automatically downloaded** on first run to `~/.brokk/brokk.jar`.
-
-For local development, you can build the JAR manually:
-```bash
-./gradlew :app:shadowJar
-```
-
-### Installation
-
-**Using uv (recommended):**
+The published command is `brokk`. For normal use, run it through `uvx` so the
+latest published package is resolved automatically:
 
 ```bash
-cd brokk-code
-uv sync
+uvx brokk --help
 ```
 
-**Using pip:**
+Local development still uses `uv run`; see [Development](#development).
+
+## Requirements
+
+- `uv`/`uvx` for normal user-facing commands and generated editor configs.
+- Python 3.11+ for local development.
+- Java 21+ for Java executor-backed commands such as `exec`, `commit`,
+  `issue`, and `pr`.
+- `curl` on Unix-like systems if Brokk needs to bootstrap `uv` or `jbang`.
+
+ACP mode launches Anvil and does not use the Java executor. MCP mode launches
+bifrost and does not use the Java executor.
+
+## Quick Start
+
+Show the available commands:
 
 ```bash
-cd brokk-code
-pip install -e .
+uvx brokk --help
 ```
 
-### Running
-
-**With uv:**
+Install an editor integration:
 
 ```bash
-uv run brokk
+uvx brokk install zed
+uvx brokk install intellij
+uvx brokk install neovim --plugin codecompanion
+uvx brokk install neovim --plugin avante
 ```
 
-**With pip installation:**
+Install MCP integration settings for Claude Code and Codex:
 
 ```bash
-brokk
+uvx brokk install mcp
 ```
 
-**Or run directly:**
+Install the local Codex plugin entry:
 
 ```bash
-python -m brokk_code
+uvx brokk install codex-plugin
 ```
 
-Running `brokk` without a subcommand prints the help menu.
+Installers write client configuration only. They do not configure GitHub auth,
+do not require a Brokk API key, and do not warm Java/Anvil/bifrost runtime
+dependencies. Where supported, generated config launches Brokk as `uvx brokk
+...` so clients resolve the current package at runtime.
 
-### ACP Mode
+Use `--force` to replace an existing generated integration entry when the
+installer supports it.
 
-Run the [Anvil](https://github.com/BrokkAi/anvil) ACP server mode over stdio:
+## Provider Configuration
+
+Brokk defaults to the Brokk proxy provider. You can inspect or change the
+provider stored in `~/.brokk/brokk.properties`:
 
 ```bash
-uv run brokk acp
+uvx brokk provider status
+uvx brokk provider brokk
+uvx brokk provider custom \
+  --url http://localhost:11434/v1 \
+  --model llama3.1 \
+  --api-key ""
 ```
 
-This mode is headless and intended for ACP-compatible clients. On first use
-brokk-code resolves Anvil in this order: `--anvil-binary` override > `anvil`
-on `$PATH` > a downloaded release pinned to the bundled Anvil version.
-
-### Bifrost MCP Mode
-
-Run the [bifrost](https://github.com/BrokkAi/bifrost) (Rust) MCP server over stdio:
+The install command can set provider values at the same time:
 
 ```bash
-uv run brokk mcp --workspace .
+uvx brokk install zed \
+  --provider custom \
+  --provider-url http://localhost:11434/v1 \
+  --provider-model llama3.1
 ```
 
-On first use brokk-code resolves the binary in this order: `--bifrost-binary` override > `bifrost` on `$PATH` > a downloaded release pinned to `BUNDLED_BIFROST_VERSION` (cached under the platform cache dir, e.g. `~/Library/Caches/Brokk/bifrost/<version>/` on macOS). Bifrost ships native binaries for arm64 macOS, x86_64/aarch64 Linux, and x86_64/aarch64 Windows; Intel macOS is not supported by upstream.
+## ACP Server
 
-### Editor Integration Installers
-
-You can generate integration settings for supported clients:
+Run Anvil as an ACP server over stdio:
 
 ```bash
-uv run brokk install zed
-uv run brokk install intellij
-uv run brokk install neovim --plugin codecompanion
-uv run brokk install neovim --plugin avante
+uvx brokk acp --workspace .
 ```
 
-Installers only write client configuration. ACP integrations launch `brokk acp`,
-and MCP integrations launch `brokk mcp`; they do not configure GitHub auth or a
-Brokk API key.
+Resolution order for Anvil is:
 
-If you run `brokk install neovim` without `--plugin`, Brokk shows a menu in interactive terminals.
+1. `--anvil-binary <path>`
+2. `anvil` on `PATH`
+3. A downloaded release pinned to the bundled Anvil version
 
-#### Neovim + CodeCompanion
+Useful ACP options:
 
-`brokk install neovim --plugin codecompanion` creates a Brokk ACP adapter module at:
+```bash
+uvx brokk acp --workspace . --default-model gpt-5.2
+uvx brokk acp --workspace . --max-turns 20
+uvx brokk acp --workspace . --bifrost-binary /path/to/bifrost
+```
 
-`~/.config/nvim/lua/brokk/brokk_codecompanion.lua`
+`brokk acp` rejects Java executor options such as `--jar` and
+`--executor-version`.
 
-What is CodeCompanion?
-- `codecompanion.nvim` is a Neovim plugin for AI chat, code assistance, and agent workflows.
-- It can connect to ACP-compatible agent servers.
-- Brokk provides one of those agent servers via `brokk acp`.
+## MCP Server
 
-What this installer does:
-- Writes a small adapter module that tells CodeCompanion to start and talk to Brokk over ACP.
-- Keeps this Brokk-specific config in a clearly named module (`brokk.brokk_codecompanion`).
-- Attempts a conservative auto-wire of `~/.config/nvim/init.lua` when it can safely patch a simple `opts = {}` plugin spec.
-- Does **not** install Neovim plugins by itself.
+Run bifrost as an MCP server over stdio:
 
-1. Install CodeCompanion:
-   - GitHub: <https://github.com/olimorris/codecompanion.nvim>
-   - Docs: <https://codecompanion.olimorris.dev/>
-2. Ensure Brokk is available on your shell `PATH` as `brokk` (or edit the generated file command).
-3. Wire the generated Brokk module into your CodeCompanion plugin setup:
+```bash
+uvx brokk mcp --workspace .
+```
+
+Resolution order for bifrost is:
+
+1. `--bifrost-binary <path>`
+2. `bifrost` on `PATH`
+3. A downloaded release pinned to the bundled bifrost version
+
+`brokk mcp` rejects Java executor options such as `--jar` and
+`--executor-version`. Unknown arguments are passed through to bifrost.
+
+## Editor Integrations
+
+### Zed and IntelliJ
+
+```bash
+uvx brokk install zed
+uvx brokk install intellij
+uvx brokk install jetbrains
+```
+
+These installers add a custom ACP agent server entry that launches:
+
+```bash
+uvx brokk acp
+```
+
+`jetbrains` is an alias for `intellij`.
+
+### Neovim + CodeCompanion
+
+```bash
+uvx brokk install neovim --plugin codecompanion
+```
+
+This writes:
+
+```text
+~/.config/nvim/lua/brokk/brokk_codecompanion.lua
+```
+
+It creates a CodeCompanion ACP adapter named `brokk`. The installer may patch a
+simple `init.lua` plugin spec when it can do so conservatively; otherwise load
+the module from your CodeCompanion setup:
 
 ```lua
 {
@@ -127,25 +168,22 @@ What this installer does:
 }
 ```
 
-The generated module sets `interactions.chat.adapter = "brokk"` so Brokk becomes the default for CodeCompanion chat.
+The generated module sets Brokk as the default chat adapter. If CodeCompanion
+still reports its default Copilot adapter, the Brokk module is not loaded yet.
 
-If you see `Copilot Adapter: No token found`, CodeCompanion is still using its default adapter and the Brokk module is not loaded yet.
+### Neovim + Avante
 
-#### Neovim + Avante
+```bash
+uvx brokk install neovim --plugin avante
+```
 
-`brokk install neovim --plugin avante` creates a Brokk Avante provider module at:
+This writes:
 
-`~/.config/nvim/lua/brokk/brokk_avante.lua`
+```text
+~/.config/nvim/lua/brokk/brokk_avante.lua
+```
 
-What is Avante?
-- `avante.nvim` is a Neovim AI assistant plugin that supports ACP providers.
-- Brokk can be configured as an ACP provider via `brokk acp`.
-- Installer behavior is the same: write Brokk module first, then only auto-patch `init.lua` when safe.
-
-1. Install Avante:
-   - GitHub: <https://github.com/yetone/avante.nvim>
-2. Ensure Brokk is available on your shell `PATH` as `brokk` (or edit the generated file command).
-3. Load the generated Brokk provider in your Avante config:
+Load the generated provider in your Avante config:
 
 ```lua
 local brokk = require("brokk.brokk_avante")
@@ -155,93 +193,114 @@ require("avante").setup(vim.tbl_deep_extend("force", brokk, {
 }))
 ```
 
-### Options
-
-- `--workspace <path>`: Specify the workspace directory (defaults to current directory).
-- `brokk acp --anvil-binary <path>`: Specify a custom Anvil binary for ACP mode.
-- `--executor-version <tag>`: Specify a version/tag of the executor to download (e.g., `v0.1.0`).
-- `--executor-snapshot`: Download the latest snapshot release instead of the stable release (ignored if `--executor-version` is set).
-- `--jar <path>`: Specify a custom path to `brokk.jar`. This **overrides** all version/download logic.
-
-### Selecting an Executor Version
-
-Commands that launch the Java executor download the latest stable release to `~/.brokk/brokk.jar`. You can pin a specific version using the `--executor-version` flag:
+### Claude Code and Codex MCP
 
 ```bash
-uv run brokk exec --executor-version v0.1.0 "Fix the bug"
+uvx brokk install mcp
 ```
 
-Versioned JARs are cached at `~/.brokk/brokk-<tag>.jar`.
+This configures Brokk MCP entries for Claude Code and Codex and installs helper
+skills/instructions for workspace activation and summaries.
 
-### Key Bindings
-
-| Key | Action |
-|-----|--------|
-| `Ctrl+L` | Toggle context panel |
-| `Ctrl+N` | Toggle notifications panel |
-| `Shift+Tab` | Toggle mode (CODE/ASK/LUTZ) |
-| `Ctrl+D` | Exit immediately |
-| `Ctrl+C` | Cancel job / quit |
-| `Ctrl+P` | Open settings |
-
-### Task List Key Bindings (when the task list is open)
-
-| Key | Action |
-|-----|--------|
-| `Up/Down` | Move selection |
-| `Enter` or `Space` | Toggle selected task done |
-| `A` | Add task |
-| `E` | Edit selected task title |
-| `D` | Delete selected task |
-| `Esc` | Close task list |
-
-## Theming
-
-### Textual vs Java Themes
-`brokk` is a Terminal UI built with the **Textual** framework. It uses Textual's built-in theme system and CSS (`app.tcss`).
-- **Does NOT use** Java/FlatLaf `*.theme.json` files found in the Java executor resources.
-- **Available Themes**: Supports all built-in Textual themes (like `textual-dark`, `textual-light`).
-- **Customization**: UI colors are defined via TCSS variables in `brokk_code/styles/app.tcss`.
-
-### Persistence & Interaction
-- **Settings**: The current theme is persisted in `~/.brokk/settings.json` under the `theme` key.
-- **Settings Picker**: Use `Ctrl+P` then select `Change theme` to open settings (including theme options like solarized).
-- **Command**: You can use `/settings` to open the same picker.
-
-### Issue Management (GitHub)
-
-The Python CLI supports creating GitHub issues based on repository evidence via the `issue create` command. This is a read-only operation for the local repository; it uses the GitHub API to post a new issue.
+### Codex Plugin
 
 ```bash
-# Example: Create an issue for a discovered bug
-brokk issue create "Describe the NPE in AuthService" \
-  --repo-owner acme-corp \
-  --repo-name service-api \
-  --github-token ghp_yourToken
+uvx brokk install codex-plugin
 ```
 
-**Required Arguments:**
-- `prompt`: A description of the problem or evidence to report.
-- `--repo-owner` / `--repo-name`: Target GitHub repository.
-- `--github-token`: GitHub PAT (can also be set via `GITHUB_TOKEN` environment variable).
+This installs local Codex plugin files and adds a local marketplace entry. After
+running it, restart Codex, choose the local marketplace, and install Brokk.
 
-### Commands
+### Direct Rust ACP for Zed/IntelliJ
 
-| Command | Description |
-|---------|-------------|
-| `/model <name>` | Switch the LLM model |
-| `/task` | Open/close the task list |
-| `/help` | Show available commands |
-| `/quit` | Exit the application |
+For development or direct Rust ACP usage, Zed and IntelliJ can be wired to
+`brokk-acp` instead of `uvx brokk acp`:
 
-## For Contributors & LLMs
+```bash
+uvx brokk install zed --rust --provider-model gpt-5.2
+uvx brokk install intellij --rust --provider-model gpt-5.2
+```
 
-To avoid common mistakes when working on this subproject:
+In this mode `brokk-acp` and `bifrost` must already be installed and available
+on the editor's inherited `PATH`. Use `--brokk-acp-binary <path>` to write an
+explicit `brokk-acp` path.
 
-- **Context**: `brokk` is the **Python TUI client**. It launches and manages the **Java executor** as a subprocess.
-- **Do**: Run all Python-related commands (pytest, ruff, uv) from within the `brokk-code/` directory.
-- **Don't**: Assume `./gradlew` builds the Python client; it builds the Java executor/app.
-- **Executor JAR**: The client automatically downloads/caches the executor to `~/.brokk/brokk.jar` (or `brokk-<tag>.jar`).
-- **Guidelines**: 
-    - See [AGENTS.md](AGENTS.md) for general Python contribution rules.
-    - See [brokk_code/AGENTS.md](brokk_code/AGENTS.md) for package-specific details.
+## Headless Repository Commands
+
+These commands use the Java headless executor. Without `--jar`, Brokk uses
+JBang to run the bundled executor JAR from the Brokk release channel and will
+bootstrap/trust JBang sources if needed.
+
+```bash
+uvx brokk exec "Find the likely cause of the failing test"
+uvx brokk commit
+uvx brokk commit "Fix startup race"
+```
+
+GitHub issue commands:
+
+```bash
+uvx brokk issue create "Report the flaky checkout failure" \
+  --repo-owner acme \
+  --repo-name service \
+  --github-token "$GITHUB_TOKEN"
+
+uvx brokk issue diagnose \
+  --issue-number 123 \
+  --repo-owner acme \
+  --repo-name service \
+  --github-token "$GITHUB_TOKEN"
+
+uvx brokk issue solve \
+  --issue-number 123 \
+  --repo-owner acme \
+  --repo-name service \
+  --github-token "$GITHUB_TOKEN"
+```
+
+Pull request commands:
+
+```bash
+uvx brokk pr create --title "Fix startup race" --body "See commits."
+uvx brokk pr review \
+  --pr-number 123 \
+  --repo-owner acme \
+  --repo-name service \
+  --github-token "$GITHUB_TOKEN"
+```
+
+Common runtime options:
+
+- `--workspace <path>`: workspace directory, defaulting to the current directory.
+- `--worktree`: run the command in an isolated git worktree when applicable.
+- `--vendor <name>`: set the Java executor's "Other Models" vendor preference.
+- `--jar <path>`: run a local executor JAR directly with Java.
+- `--executor-version <tag>`: use a specific released executor version.
+- `--executor-snapshot` / `--executor-stable`: accepted compatibility flags.
+
+## Development
+
+Clone the repo and create the managed environment:
+
+```bash
+uv sync
+```
+
+Run the CLI from the checkout:
+
+```bash
+uv run brokk --help
+uv run brokk version
+```
+
+Run tests and linting:
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+```
+
+When changing code, keep generated repository content in English and follow the
+project guidance in [AGENTS.md](AGENTS.md) and
+[brokk_code/AGENTS.md](brokk_code/AGENTS.md).
