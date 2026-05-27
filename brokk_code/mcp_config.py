@@ -336,7 +336,13 @@ def _fetch_plugin_manifest() -> dict[str, Any]:
 def _fetch_plugin_mcp_config() -> dict[str, Any]:
     """Fetch .mcp.json from GitHub."""
     raw = _fetch_github_file("claude-plugin/.mcp.json")
-    return json.loads(raw)
+    config = json.loads(raw)
+    mcp_servers = config.get("mcpServers")
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+        config["mcpServers"] = mcp_servers
+    mcp_servers[_SERVER_NAME] = _brokk_mcp_config("uvx")
+    return config
 
 
 def _marketplace_root(marketplace_path: Path) -> Path:
@@ -440,7 +446,7 @@ def _merge_codex_tool_approval(settings_path: Path | None = None, uvx_command: s
 
     expected = {
         "command": uvx_command,
-        "args": ["brokk", "bifrost"],
+        "args": ["brokk", "mcp"],
         "default_tools_approval_mode": "approve",
     }
     server = mcp_servers.get(_SERVER_NAME)
