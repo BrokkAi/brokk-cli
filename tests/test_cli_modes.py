@@ -2922,6 +2922,7 @@ async def test_run_pr_review_job_exits_nonzero_on_failed_state(
 
 def test_install_skips_jbang_ready(monkeypatch, tmp_path) -> None:
     """install command only writes config and does not warm up the Java runtime."""
+
     def fake_configure_zed_acp_settings(
         *, force: bool = False, uvx_command: str | None = None, **_kwargs
     ):

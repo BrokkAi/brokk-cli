@@ -20,8 +20,6 @@ from brokk_code.event_utils import is_failure_state, safe_data
 from brokk_code.executor import (
     BUNDLED_EXECUTOR_VERSION,
     ExecutorError,
-    ensure_jbang_ready,
-    resolve_jbang_binary,
 )
 from brokk_code.git_utils import infer_github_repo_from_remote
 from brokk_code.intellij_config import configure_intellij_acp_settings
