@@ -14,7 +14,6 @@ import brokk_code.git_utils as git_utils_module
 
 def _stub_install_warmup(monkeypatch, stub_api_key: bool = True) -> None:
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
-    monkeypatch.setattr(main_module, "ensure_jbang_ready", lambda: "/usr/local/bin/jbang")
     monkeypatch.setattr(main_module, "_run_install_prefetch", lambda _commands: None)
     monkeypatch.setattr(
         main_module,
@@ -143,18 +142,10 @@ def test_main_acp_rejects_java_runtime_options(monkeypatch, tmp_path, capsys) ->
     def fake_run_anvil_acp_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
-    def boom_jbang() -> str:
-        raise AssertionError("ensure_jbang_ready must not be called on the acp dispatch path")
-
-    def boom_resolve_jbang() -> str | None:
-        raise AssertionError("resolve_jbang_binary must not be called on the acp dispatch path")
-
     def boom_prefetch(_commands: list) -> None:
         raise AssertionError("_run_install_prefetch must not be called on the acp dispatch path")
 
     monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
-    monkeypatch.setattr(main_module, "ensure_jbang_ready", boom_jbang)
-    monkeypatch.setattr(main_module, "resolve_jbang_binary", boom_resolve_jbang)
     monkeypatch.setattr(main_module, "_run_install_prefetch", boom_prefetch)
     monkeypatch.setattr(
         sys,
@@ -644,11 +635,6 @@ def test_main_install_verbose_does_not_prefetch_runtime(monkeypatch, tmp_path, c
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
     monkeypatch.setattr(
         main_module,
-        "ensure_jbang_ready",
-        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
-    )
-    monkeypatch.setattr(
-        main_module,
         "_run_install_prefetch",
         lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
     )
@@ -775,11 +761,6 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
     monkeypatch.setattr(
         main_module,
-        "ensure_jbang_ready",
-        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
-    )
-    monkeypatch.setattr(
-        main_module,
         "_run_install_prefetch",
         lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
     )
@@ -816,11 +797,6 @@ def test_main_install_codex_plugin_routes_to_installer(monkeypatch, tmp_path, ca
         )
 
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
-    monkeypatch.setattr(
-        main_module,
-        "ensure_jbang_ready",
-        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
-    )
     monkeypatch.setattr(main_module, "install_codex_local_plugin", fake_install_codex_local_plugin)
     monkeypatch.setattr(sys, "argv", ["brokk", "install", "codex-plugin", "--force"])
 
@@ -2931,11 +2907,6 @@ def test_install_skips_jbang_ready(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
     monkeypatch.setattr(
         main_module,
-        "ensure_jbang_ready",
-        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
-    )
-    monkeypatch.setattr(
-        main_module,
         "_run_install_prefetch",
         lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
     )
@@ -2955,11 +2926,6 @@ def test_install_zed_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
     monkeypatch.setattr(
         main_module,
-        "ensure_jbang_ready",
-        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
-    )
-    monkeypatch.setattr(
-        main_module,
         "_run_install_prefetch",
         lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
     )
@@ -2977,11 +2943,6 @@ def test_install_mcp_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> Non
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(
-        main_module,
-        "ensure_jbang_ready",
-        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
-    )
     monkeypatch.setattr(
         main_module,
         "_run_install_prefetch",
