@@ -206,7 +206,7 @@ def test_configure_intellij_acp_settings_rust_paths_with_custom_endpoint(tmp_pat
     ]
 
 
-def test_configure_intellij_acp_settings_default_native_rust_coexist(tmp_path) -> None:
+def test_configure_intellij_acp_settings_default_and_rust_coexist(tmp_path) -> None:
     settings_path = tmp_path / ".jetbrains" / "acp.json"
     rust_paths = RustAcpPaths(
         brokk_acp=Path("/opt/brokk-acp"),
@@ -214,13 +214,11 @@ def test_configure_intellij_acp_settings_default_native_rust_coexist(tmp_path) -
         model="claude-haiku-4-5",
     )
 
-    # Each install variant writes a distinct key, so all three coexist
-    # without --force.
+    # The default Anvil-backed entry and the direct Rust entry use distinct keys.
     configure_intellij_acp_settings(settings_path=settings_path)
-    configure_intellij_acp_settings(settings_path=settings_path, native=True)
     configure_intellij_acp_settings(settings_path=settings_path, rust_paths=rust_paths)
 
     agent_servers = json.loads(settings_path.read_text(encoding="utf-8"))["agent_servers"]
     assert agent_servers["Brokk Code"]["args"] == ["brokk", "acp"]
-    assert agent_servers["Brokk Code (Native)"]["args"] == ["brokk", "acp-native"]
+    assert "Brokk Code (Native)" not in agent_servers
     assert agent_servers["Brokk Code (Rust)"]["command"] == "/opt/brokk-acp"

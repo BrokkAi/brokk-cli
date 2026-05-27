@@ -17,7 +17,7 @@ This project acts as a client that communicates with the Java-based Brokk execut
 - The TUI spawns the Java executor as a subprocess.
 - It authenticates using a bearer token generated at startup.
 - It streams job events and updates the UI based on state hints from the executor.
-- ACP mode (`brokk acp`) launches the native Java ACP server directly via `mcp_launcher.run_acp_server`; there is no Python ACP bridge. The `brokk acp-native` subcommand and the `brokk install ... --native` flag are deprecated aliases that route to the same launcher.
+- ACP mode (`brokk acp`) launches Anvil directly over stdio; it does not use the Java executor or JBang. The `brokk acp-native` subcommand has been removed, and `brokk install ... --native` is a deprecated no-op.
 
 ## Code Style & Standards
 

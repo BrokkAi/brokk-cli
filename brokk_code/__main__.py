@@ -15,6 +15,7 @@ from typing import Any, Iterator
 
 from rich.console import Console
 
+from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, run_anvil_acp_server
 from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
 from brokk_code.executor import (
@@ -33,9 +34,6 @@ from brokk_code.mcp_config import (
     install_codex_local_plugin,
     install_codex_mcp_summaries_skill,
     install_codex_mcp_workspace_skill,
-)
-from brokk_code.mcp_launcher import (
-    run_acp_server as run_native_acp_server,
 )
 from brokk_code.mcp_launcher import (
     run_mcp_core_server,
@@ -747,6 +745,85 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_acp_runtime_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--worktree",
+        action="store_true",
+        default=False,
+        help="Create an isolated git worktree for this session and clean up on exit if no changes",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        default=".",
+        help="Path to the workspace directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--vendor",
+        type=str,
+        choices=["Default", "Anthropic", "Gemini", "OpenAI", "OpenAI - Codex"],
+        default=None,
+        help="[Deprecated] Ignored by the Anvil ACP server.",
+    )
+    parser.add_argument(
+        "--anvil-binary",
+        type=Path,
+        default=None,
+        help="Path to an Anvil binary (default: $PATH anvil, else cached release binary)",
+    )
+    parser.add_argument(
+        "--anvil-version",
+        type=str,
+        default=BUNDLED_ANVIL_VERSION,
+        help=f"Anvil version to use when downloading (default: {BUNDLED_ANVIL_VERSION})",
+    )
+    parser.add_argument(
+        "--default-model",
+        type=str,
+        default=None,
+        help="Override the default Anvil model id for new sessions",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="Max Anvil tool-calling iterations per prompt",
+    )
+    parser.add_argument(
+        "--bifrost-binary",
+        type=str,
+        default=None,
+        help="Path to the bifrost executable to enable Anvil code-intel tools",
+    )
+    parser.add_argument(
+        "--llm-idle-timeout-secs",
+        type=int,
+        default=None,
+        help="Seconds of Anvil SSE inactivity before aborting a streaming LLM response",
+    )
+    parser.add_argument(
+        "--no-wasm-sandbox",
+        action="store_true",
+        default=False,
+        help="Disable Anvil's wasmtime-hosted parser sandbox",
+    )
+
+
+def _build_anvil_passthrough_args(args: argparse.Namespace) -> list[str]:
+    passthrough: list[str] = []
+    if args.default_model:
+        passthrough.extend(["--default-model", args.default_model])
+    if args.max_turns is not None:
+        passthrough.extend(["--max-turns", str(args.max_turns)])
+    if args.bifrost_binary:
+        passthrough.extend(["--bifrost-binary", args.bifrost_binary])
+    if args.llm_idle_timeout_secs is not None:
+        passthrough.extend(["--llm-idle-timeout-secs", str(args.llm_idle_timeout_secs)])
+    if args.no_wasm_sandbox:
+        passthrough.append("--no-wasm-sandbox")
+    return passthrough
+
+
 def _run_issue_command(
     args: argparse.Namespace,
     jar_path: Path | None,
@@ -871,10 +948,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    acp_parser = subparsers.add_parser(
-        "acp", help="Run in ACP server mode (native Java agent over stdio JSON-RPC)"
-    )
-    _add_common_runtime_args(acp_parser)
+    acp_parser = subparsers.add_parser("acp", help="Run Anvil in ACP server mode")
+    _add_acp_runtime_args(acp_parser)
     acp_parser.add_argument(
         "--ide",
         choices=["intellij", "zed"],
@@ -884,11 +959,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "Kept for backward compatibility with stale editor configs."
         ),
     )
-
-    acp_native_parser = subparsers.add_parser(
-        "acp-native", help="[Deprecated alias for 'acp'] Run native Java ACP server"
-    )
-    _add_common_runtime_args(acp_native_parser)
 
     mcp_parser = subparsers.add_parser("mcp", help="Run in MCP server mode", add_help=False)
     _add_common_runtime_args(mcp_parser)
@@ -1988,7 +2058,7 @@ def _main_dispatch(
             sys.exit(1)
         if args.native:
             print(
-                "Warning: --native is deprecated; the Java native ACP server is now the default.",
+                "Warning: --native is deprecated and ignored; `brokk acp` now launches Anvil.",
                 file=sys.stderr,
             )
         if args.rust and args.target not in {"zed", "intellij"}:
@@ -2095,7 +2165,7 @@ def _main_dispatch(
                 settings_path = configure_zed_acp_settings(
                     force=args.force,
                     uvx_command=uvx_command,
-                    native=args.native,
+                    native=False,
                 )
                 prefetch_commands = _build_install_prefetch_commands(
                     target=args.target,
@@ -2114,7 +2184,7 @@ def _main_dispatch(
                 settings_path = configure_intellij_acp_settings(
                     force=args.force,
                     uvx_command=uvx_command,
-                    native=args.native,
+                    native=False,
                 )
                 prefetch_commands = _build_install_prefetch_commands(
                     target=args.target,
@@ -2418,20 +2488,19 @@ def _main_dispatch(
         )
         return
 
-    if args.command in ("acp", "acp-native"):
-        if args.command == "acp-native":
+    if args.command == "acp":
+        if jar_path is not None or args.executor_version is not None:
             print(
-                "Warning: 'brokk acp-native' is deprecated; use 'brokk acp' instead.",
+                "Error: `brokk acp` launches Anvil and does not support Java "
+                "--jar or --executor-version options.",
                 file=sys.stderr,
             )
-        passthrough = ["--workspace-dir", str(workspace_path)]
-        if args.vendor:
-            passthrough.extend(["--vendor", args.vendor])
-        run_native_acp_server(
+            sys.exit(1)
+        run_anvil_acp_server(
             workspace_dir=workspace_path,
-            jar_path=jar_path,
-            executor_version=args.executor_version,
-            passthrough_args=passthrough,
+            binary_override=args.anvil_binary,
+            version=args.anvil_version,
+            passthrough_args=_build_anvil_passthrough_args(args),
         )
         return
 
