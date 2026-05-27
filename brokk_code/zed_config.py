@@ -190,13 +190,11 @@ def loads_json_or_jsonc(text: str) -> Any:
 def brokk_code_entry_name(*, native: bool = False, rust_paths: RustAcpPaths | None = None) -> str:
     """Returns the agent_servers key for a given install variant.
 
-    Distinct keys per variant let the default, --native, and --rust installs
+    Distinct keys let the default Anvil-backed entry and direct Rust installs
     coexist in the same editor config instead of overwriting each other.
     """
     if rust_paths is not None:
         return "Brokk Code (Rust)"
-    if native:
-        return "Brokk Code (Native)"
     return "Brokk Code"
 
 
@@ -235,7 +233,7 @@ def _brokk_code_agent_server_config(
         },
         "type": "custom",
         "command": uvx_command,
-        "args": ["brokk", "acp-native" if native else "acp"],
+        "args": ["brokk", "acp"],
         "env": {},
     }
 

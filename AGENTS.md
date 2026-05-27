@@ -17,6 +17,7 @@ This project acts as a client that communicates with the Java-based Brokk execut
 - The TUI spawns the Java executor as a subprocess.
 - It authenticates using a bearer token generated at startup.
 - It streams job events and updates the UI based on state hints from the executor.
+- ACP mode (`brokk acp`) launches Anvil directly over stdio; it does not use the Java executor or JBang.
 - For ACP mode startup, use `wait_live()`/`wait_ready()` only as a liveness probe; it no longer depends on session preload.
 - In ACP mode, do NOT emit context snapshots after prompt completion. This feature was removed because inconsistent Markdown and data URI support across ACP clients (e.g., IntelliJ vs. Zed) led to poor rendering of token bars and resource blocks.
 

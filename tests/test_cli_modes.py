@@ -254,13 +254,13 @@ def test_main_without_command_prints_help(monkeypatch, capsys) -> None:
     assert "Launch the interactive TUI" not in captured.out
 
 
-def test_main_acp_routes_to_native_launcher(monkeypatch, tmp_path) -> None:
+def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_run_native_acp_server(**kwargs: Any) -> None:
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(main_module, "run_native_acp_server", fake_run_native_acp_server)
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -269,51 +269,48 @@ def test_main_acp_routes_to_native_launcher(monkeypatch, tmp_path) -> None:
             "acp",
             "--workspace",
             str(tmp_path),
-            "--executor-stable",
             "--vendor",
             "Gemini",
+            "--default-model",
+            "claude-haiku-4-5",
+            "--bifrost-binary",
+            "/opt/bifrost",
         ],
     )
 
     main_module.main()
 
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert "--workspace-dir" in captured["kwargs"]["passthrough_args"]
-    assert "--vendor" in captured["kwargs"]["passthrough_args"]
-    assert "Gemini" in captured["kwargs"]["passthrough_args"]
+    assert captured["kwargs"]["binary_override"] is None
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--default-model",
+        "claude-haiku-4-5",
+        "--bifrost-binary",
+        "/opt/bifrost",
+    ]
 
 
-def test_main_acp_native_alias_warns_and_routes(monkeypatch, tmp_path, capsys) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_run_native_acp_server(**kwargs: Any) -> None:
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(main_module, "run_native_acp_server", fake_run_native_acp_server)
+def test_main_acp_native_command_is_removed(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
         ["brokk", "acp-native", "--workspace", str(tmp_path)],
     )
 
-    main_module.main()
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main()
 
-    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert "deprecated" in capsys.readouterr().err.lower()
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err.lower()
 
 
-def test_main_acp_with_jar_forwards_jar_and_skips_jbang(monkeypatch, tmp_path) -> None:
-    """`brokk acp --jar <path>` must forward jar_path verbatim and never touch jbang.
-
-    End-to-end dispatch contract: the only thing main() does on the acp branch
-    is call run_native_acp_server with the resolved jar_path. No ensure_jbang_ready,
-    no install prefetch, no release-jar URL machinery.
-    """
+def test_main_acp_rejects_java_runtime_options(monkeypatch, tmp_path, capsys) -> None:
+    """`brokk acp` launches Anvil and must not accept the Java executor path."""
     captured: dict[str, Any] = {}
     jar_path = tmp_path / "brokk.jar"
     jar_path.write_text("dummy")
 
-    def fake_run_native_acp_server(**kwargs: Any) -> None:
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
     def boom_jbang() -> str:
@@ -325,7 +322,7 @@ def test_main_acp_with_jar_forwards_jar_and_skips_jbang(monkeypatch, tmp_path) -
     def boom_prefetch(_commands: list) -> None:
         raise AssertionError("_run_install_prefetch must not be called on the acp dispatch path")
 
-    monkeypatch.setattr(main_module, "run_native_acp_server", fake_run_native_acp_server)
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
     monkeypatch.setattr(main_module, "ensure_jbang_ready", boom_jbang)
     monkeypatch.setattr(main_module, "resolve_jbang_binary", boom_resolve_jbang)
     monkeypatch.setattr(main_module, "_run_install_prefetch", boom_prefetch)
@@ -334,30 +331,22 @@ def test_main_acp_with_jar_forwards_jar_and_skips_jbang(monkeypatch, tmp_path) -
         "argv",
         [
             "brokk",
-            "acp",
-            "--workspace",
-            str(tmp_path),
             "--jar",
             str(jar_path),
             "--executor-version",
             "9.9.9",
+            "acp",
+            "--workspace",
+            str(tmp_path),
         ],
     )
 
-    main_module.main()
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main()
 
-    kwargs = captured["kwargs"]
-    assert kwargs["workspace_dir"] == tmp_path.resolve()
-    assert kwargs["jar_path"] == jar_path.resolve()
-    assert kwargs["executor_version"] == "9.9.9"
-    passthrough = kwargs["passthrough_args"]
-    assert "--workspace-dir" in passthrough
-    assert str(tmp_path.resolve()) in passthrough
-    # Nothing in the forwarded kwargs should reference jbang or the release CDN.
-    for value in kwargs.values():
-        rendered = str(value)
-        assert "jbang" not in rendered.lower()
-        assert "brokk-releases" not in rendered
+    assert excinfo.value.code == 1
+    assert captured == {}
+    assert "does not support java" in capsys.readouterr().err.lower()
 
 
 def test_main_mcp_routes_to_launcher(monkeypatch, tmp_path) -> None:
@@ -389,7 +378,7 @@ def test_main_mcp_routes_to_launcher(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
     assert captured["kwargs"]["jar_path"] == jar_path.resolve()
     assert captured["kwargs"]["executor_version"] == "0.99.0"
-    # Ensure no residual ide parameter is passed from CLI to run_acp_server
+    # Ensure no residual ide parameter is passed from CLI to the Anvil launcher.
     assert "ide" not in captured["kwargs"]
 
 
@@ -506,10 +495,10 @@ def test_main_exec_resolves_workspace_to_repo_root(monkeypatch, tmp_path) -> Non
 def test_main_acp_accepts_legacy_ide_flag_but_ignores_it(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_run_native_acp_server(**kwargs: Any) -> None:
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(main_module, "run_native_acp_server", fake_run_native_acp_server)
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
     monkeypatch.setattr(
         sys,
         "argv",

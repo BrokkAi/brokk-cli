@@ -103,13 +103,15 @@ xclip -o -selection clipboard | uv run brokk login --stdin
 
 ### ACP Mode
 
-Run the official ACP server mode over stdio:
+Run the [Anvil](https://github.com/BrokkAi/anvil) ACP server mode over stdio:
 
 ```bash
 uv run brokk acp
 ```
 
-This mode is headless and intended for ACP-compatible clients.
+This mode is headless and intended for ACP-compatible clients. On first use
+brokk-code resolves Anvil in this order: `--anvil-binary` override > `anvil`
+on `$PATH` > a downloaded release pinned to the bundled Anvil version.
 
 ### Bifrost MCP Mode
 
@@ -197,16 +199,17 @@ require("avante").setup(vim.tbl_deep_extend("force", brokk, {
 ### Options
 
 - `--workspace <path>`: Specify the workspace directory (defaults to current directory).
+- `brokk acp --anvil-binary <path>`: Specify a custom Anvil binary for ACP mode.
 - `--executor-version <tag>`: Specify a version/tag of the executor to download (e.g., `v0.1.0`).
 - `--executor-snapshot`: Download the latest snapshot release instead of the stable release (ignored if `--executor-version` is set).
 - `--jar <path>`: Specify a custom path to `brokk.jar`. This **overrides** all version/download logic.
 
 ### Selecting an Executor Version
 
-Commands that launch the executor download the latest stable release to `~/.brokk/brokk.jar`. You can pin a specific version using the `--executor-version` flag:
+Commands that launch the Java executor download the latest stable release to `~/.brokk/brokk.jar`. You can pin a specific version using the `--executor-version` flag:
 
 ```bash
-uv run brokk acp --executor-version v0.1.0
+uv run brokk exec --executor-version v0.1.0 "Fix the bug"
 ```
 
 Versioned JARs are cached at `~/.brokk/brokk-<tag>.jar`.

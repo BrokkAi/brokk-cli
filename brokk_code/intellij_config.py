@@ -65,7 +65,7 @@ def configure_intellij_acp_settings(
     else:
         agent_servers[entry_name] = {
             "command": uvx_command,
-            "args": ["brokk", "acp-native" if native else "acp"],
+            "args": ["brokk", "acp"],
             "env": {},
         }
 
