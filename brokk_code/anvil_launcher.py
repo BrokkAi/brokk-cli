@@ -98,7 +98,13 @@ def resolve_anvil_binary(
 
     binary_path = _anvil_cache_binary_path(version)
     if binary_path.exists() and os.access(binary_path, os.X_OK):
-        return binary_path
+        if _anvil_version_matches(binary_path, version):
+            return binary_path
+        logger.info(
+            "Ignoring cached anvil at %s: version does not match bundled %s",
+            binary_path,
+            version,
+        )
 
     return _download_anvil(version)
 
@@ -174,7 +180,9 @@ def _anvil_archive_url(version: str, asset_name: str) -> str:
 
 @contextlib.contextmanager
 def _anvil_download_lock(version: str) -> Iterator[None]:
-    lock_path = get_global_cache_dir() / "anvil" / f"{version}.lock"
+    """File-based lock to serialize concurrent downloads of the same platform asset."""
+    triple = _anvil_triple()
+    lock_path = get_global_cache_dir() / "anvil" / f"{version}-{triple}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     deadline = time.monotonic() + _ANVIL_LOCK_TIMEOUT_SECONDS
@@ -211,7 +219,13 @@ def _download_anvil(version: str) -> Path:
 
     with _anvil_download_lock(version):
         if target.exists() and os.access(target, os.X_OK):
-            return target
+            if _anvil_version_matches(target, version):
+                return target
+            logger.info(
+                "Replacing cached anvil at %s: version does not match bundled %s",
+                target,
+                version,
+            )
 
         logger.info("Downloading anvil %s for %s from %s", version, triple, archive_url)
         with tempfile.TemporaryDirectory(prefix="brokk-anvil-") as tmpdir:
