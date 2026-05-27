@@ -4,7 +4,6 @@ import base64
 import contextlib
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -17,10 +16,7 @@ from rich.console import Console
 from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, run_anvil_acp_server
 from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
-from brokk_code.executor import (
-    BUNDLED_EXECUTOR_VERSION,
-    ExecutorError,
-)
+from brokk_code.executor import ExecutorError
 from brokk_code.git_utils import infer_github_repo_from_remote
 from brokk_code.intellij_config import configure_intellij_acp_settings
 from brokk_code.mcp_config import (
@@ -31,10 +27,6 @@ from brokk_code.mcp_config import (
     install_codex_local_plugin,
     install_codex_mcp_summaries_skill,
     install_codex_mcp_workspace_skill,
-)
-from brokk_code.mcp_launcher import (
-    run_mcp_core_server,
-    run_mcp_server,
 )
 from brokk_code.nvim_config import configure_nvim_codecompanion_acp_settings
 from brokk_code.nvim_init_patch import wire_nvim_plugin_setup
@@ -52,10 +44,6 @@ DEFAULT_PLANNER_MODEL = "gpt-5.4"
 DEFAULT_CODE_MODEL = "gemini-3-flash-preview"
 
 REPO_COMPONENT_ALLOWLIST_REGEX = r"^[A-Za-z0-9_.-]+$"
-_EXECUTOR_JAR_BASE_URL = "https://github.com/BrokkAi/brokk-releases/releases/download"
-_HEADLESS_EXECUTOR_MAIN_CLASS = "ai.brokk.executor.HeadlessExecutorMain"
-_MCP_SERVER_MAIN_CLASS = "ai.brokk.mcpserver.BrokkExternalMcpServer"
-_JBANG_PREFETCH_TIMEOUT_SECONDS = 120.0
 
 
 def _resolve_neovim_plugin(*, plugin: str | None) -> str:
@@ -144,118 +132,6 @@ def _validate_github_params(
         sys.exit(1)
 
 
-def _build_executor_prefetch_command(
-    *, jbang_binary: str, executor_version: str | None
-) -> list[str]:
-    version = executor_version or BUNDLED_EXECUTOR_VERSION
-    jar_url = f"{_EXECUTOR_JAR_BASE_URL}/{version}/brokk-{version}.jar"
-    return [
-        jbang_binary,
-        "--java",
-        "21",
-        "-R",
-        "-Djava.awt.headless=true "
-        + "-Dapple.awt.UIElement=true "
-        + "--enable-native-access=ALL-UNNAMED",
-        "--main",
-        _HEADLESS_EXECUTOR_MAIN_CLASS,
-        jar_url,
-        "--help",
-    ]
-
-
-def _build_mcp_prefetch_command(*, jbang_binary: str) -> list[str]:
-    version = BUNDLED_EXECUTOR_VERSION
-    jar_url = f"{_EXECUTOR_JAR_BASE_URL}/{version}/brokk-{version}.jar"
-    return [
-        jbang_binary,
-        "--java",
-        "21",
-        "-R",
-        "-Djava.awt.headless=true -Dapple.awt.UIElement=true",
-        "-R",
-        "--enable-native-access=ALL-UNNAMED",
-        "--main",
-        _MCP_SERVER_MAIN_CLASS,
-        jar_url,
-        "--help",
-    ]
-
-
-def _build_install_prefetch_commands(
-    *, target: str, jbang_binary: str, executor_version: str | None
-) -> list[tuple[str, list[str]]]:
-    if target == "mcp":
-        return [("MCP runtime", _build_mcp_prefetch_command(jbang_binary=jbang_binary))]
-    return [
-        (
-            "Executor runtime",
-            _build_executor_prefetch_command(
-                jbang_binary=jbang_binary, executor_version=executor_version
-            ),
-        )
-    ]
-
-
-def _run_jbang_prefetch_command(label: str, command: list[str]) -> None:
-    proc = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=_JBANG_PREFETCH_TIMEOUT_SECONDS,
-    )
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        if detail:
-            detail = f": {detail}"
-        raise ExecutorError(f"{label} prefetch failed with code {proc.returncode}{detail}")
-
-
-async def _spin_for_prefetch(commands: list[asyncio.Task[None]], *, label: str) -> None:
-    if not commands or not sys.stdout.isatty():
-        return
-
-    spinner_frames = "|/-\\"
-    frame_index = 0
-    total = len(commands)
-    while True:
-        done = sum(1 for command in commands if command.done())
-        if done >= total:
-            break
-        frame = spinner_frames[frame_index % len(spinner_frames)]
-        frame_index += 1
-        sys.stdout.write(f"\r{frame} {label} ({done}/{total})")
-        sys.stdout.flush()
-        await asyncio.sleep(0.12)
-
-    clear_len = len(f"{label} ({total}/{total})") + 10
-    sys.stdout.write(f"\r{' ' * clear_len}\r")
-    print(f"{label} ({total}/{total})")
-
-
-async def _run_install_prefetch_async(commands: list[tuple[str, list[str]]]) -> None:
-    tasks: list[asyncio.Task[None]] = [
-        asyncio.create_task(asyncio.to_thread(_run_jbang_prefetch_command, label, cmd))
-        for label, cmd in commands
-    ]
-    spinner = asyncio.create_task(_spin_for_prefetch(tasks, label="Prefetching Brokk dependencies"))
-    try:
-        await asyncio.gather(*tasks)
-    finally:
-        await spinner
-
-
-def _run_install_prefetch(commands: list[tuple[str, list[str]]]) -> None:
-    if not commands:
-        return
-    asyncio.run(_run_install_prefetch_async(commands))
-
-
-def _print_install_prefetch_commands(commands: list[tuple[str, list[str]]]) -> None:
-    for _, command in commands:
-        print(shlex.join(command))
-
-
 def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--worktree",
@@ -283,7 +159,7 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--jar",
         type=str,
         default=None,
-        help="Path to brokk.jar (bypasses jbang; default: use jbang to launch)",
+        help="Path to brokk.jar for Java executor commands",
     )
     parser.add_argument(
         "--executor-version",
@@ -295,13 +171,13 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--executor-snapshot",
         action="store_true",
         default=True,
-        help="[Ignored] Use jbang to manage versions",
+        help="[Ignored] Java executor compatibility flag",
     )
     parser.add_argument(
         "--executor-stable",
         action="store_false",
         dest="executor_snapshot",
-        help="[Ignored] Use jbang to manage versions",
+        help="[Ignored] Java executor compatibility flag",
     )
 
 
@@ -520,21 +396,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    mcp_parser = subparsers.add_parser("mcp", help="Run in MCP server mode", add_help=False)
-    _add_common_runtime_args(mcp_parser)
-
-    mcp_core_parser = subparsers.add_parser(
-        "mcp-core", help="Run in MCP core (read-only) server mode", add_help=False
-    )
-    _add_common_runtime_args(mcp_core_parser)
-
-    bifrost_parser = subparsers.add_parser(
-        "bifrost",
-        help="Run the bifrost (Rust) MCP server (downloads the bundled binary on first use)",
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="Run the bifrost MCP server (downloads the bundled binary on first use)",
         add_help=False,
     )
-    _add_common_runtime_args(bifrost_parser)
-    bifrost_parser.add_argument(
+    _add_common_runtime_args(mcp_parser)
+    mcp_parser.add_argument(
         "--bifrost-binary",
         type=str,
         default=None,
@@ -599,7 +467,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         default=False,
-        help="Accepted for compatibility; install no longer prefetches runtime dependencies",
+        help="Accepted for compatibility; install no longer warms runtime dependencies",
     )
     install_parser.add_argument(
         "--provider",
@@ -1455,7 +1323,7 @@ def main():
     parser = _build_parser()
     args, unknown = parser.parse_known_args()
 
-    if unknown and args.command not in ("mcp", "mcp-core", "bifrost"):
+    if unknown and args.command != "mcp":
         parser.error(f"unrecognized arguments: {' '.join(unknown)}")
 
     if args.command is None:
@@ -1465,13 +1333,6 @@ def main():
     # Resolve paths early so they are available to all commands
     workspace_path = Path(args.workspace).resolve()
     jar_path = Path(args.jar).resolve() if args.jar else None
-
-    if jar_path is not None and args.command == "mcp-core" and "brokk-core" not in jar_path.name:
-        print(
-            "Warning: The specified jar doesn't appear to be a brokk-core jar."
-            " Expected a jar containing 'brokk-core' in the filename.",
-            file=sys.stderr,
-        )
 
     use_worktree = getattr(args, "worktree", False) and args.command not in _NON_WORKSPACE_COMMANDS
     if use_worktree:
@@ -1553,7 +1414,7 @@ def _main_dispatch(
                 write_brokk_properties({"llmProxySetting": "BROKK"})
 
         # Rust ACP path: self-contained. Skips the Brokk API key, GitHub token,
-        # jbang/uv prefetch -- the Rust binary connects directly to the user's
+        # runtime warmup -- the Rust binary connects directly to the user's
         # chosen LLM endpoint and never talks to Brokk's service.
         # brokk-code does NOT build or fetch brokk-acp/bifrost; the user is
         # responsible for installing them. We just resolve their paths.
@@ -1838,24 +1699,14 @@ def _main_dispatch(
         return
 
     if args.command == "mcp":
-        run_mcp_server(
-            workspace_dir=workspace_path,
-            jar_path=jar_path,
-            executor_version=args.executor_version,
-            passthrough_args=unknown,
-        )
-        return
+        if jar_path is not None or args.executor_version is not None:
+            print(
+                "Error: `brokk mcp` launches bifrost and does not support Java "
+                "--jar or --executor-version options.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    if args.command == "mcp-core":
-        run_mcp_core_server(
-            workspace_dir=workspace_path,
-            jar_path=jar_path,
-            executor_version=args.executor_version,
-            passthrough_args=unknown,
-        )
-        return
-
-    if args.command == "bifrost":
         from brokk_code.bifrost_launcher import run_bifrost_server
 
         bifrost_override = (

@@ -14,7 +14,6 @@ import brokk_code.git_utils as git_utils_module
 
 def _stub_install_warmup(monkeypatch, stub_api_key: bool = True) -> None:
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
-    monkeypatch.setattr(main_module, "_run_install_prefetch", lambda _commands: None)
     monkeypatch.setattr(
         main_module,
         "wire_nvim_plugin_setup",
@@ -142,11 +141,7 @@ def test_main_acp_rejects_java_runtime_options(monkeypatch, tmp_path, capsys) ->
     def fake_run_anvil_acp_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
-    def boom_prefetch(_commands: list) -> None:
-        raise AssertionError("_run_install_prefetch must not be called on the acp dispatch path")
-
     monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
-    monkeypatch.setattr(main_module, "_run_install_prefetch", boom_prefetch)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -170,15 +165,17 @@ def test_main_acp_rejects_java_runtime_options(monkeypatch, tmp_path, capsys) ->
     assert "does not support java" in capsys.readouterr().err.lower()
 
 
-def test_main_mcp_routes_to_launcher(monkeypatch, tmp_path) -> None:
+def test_main_mcp_rejects_java_runtime_options(monkeypatch, tmp_path, capsys) -> None:
     captured: dict[str, Any] = {}
     jar_path = tmp_path / "brokk.jar"
     jar_path.write_text("dummy")
 
-    def fake_run_mcp_server(**kwargs: Any) -> None:
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(main_module, "run_mcp_server", fake_run_mcp_server)
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -194,16 +191,15 @@ def test_main_mcp_routes_to_launcher(monkeypatch, tmp_path) -> None:
         ],
     )
 
-    main_module.main()
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main()
 
-    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert captured["kwargs"]["jar_path"] == jar_path.resolve()
-    assert captured["kwargs"]["executor_version"] == "0.99.0"
-    # Ensure no residual ide parameter is passed from CLI to the Anvil launcher.
-    assert "ide" not in captured["kwargs"]
+    assert excinfo.value.code == 1
+    assert captured == {}
+    assert "does not support java" in capsys.readouterr().err.lower()
 
 
-def test_main_bifrost_routes_to_launcher(monkeypatch, tmp_path) -> None:
+def test_main_mcp_routes_to_bifrost_launcher(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
     binary = tmp_path / "bifrost"
     binary.write_text("stub")
@@ -219,7 +215,7 @@ def test_main_bifrost_routes_to_launcher(monkeypatch, tmp_path) -> None:
         "argv",
         [
             "brokk",
-            "bifrost",
+            "mcp",
             "--workspace",
             str(tmp_path),
             "--bifrost-binary",
@@ -235,13 +231,33 @@ def test_main_bifrost_routes_to_launcher(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["passthrough_args"] == ["--debug"]
 
 
+def test_main_bifrost_subcommand_is_removed(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["brokk", "bifrost"])
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main()
+
+    assert exc.value.code == 2
+
+
+def test_main_mcp_core_subcommand_is_removed(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["brokk", "mcp-core"])
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main()
+
+    assert exc.value.code == 2
+
+
 def test_main_mcp_forwards_unknown_args_as_passthrough(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_run_mcp_server(**kwargs: Any) -> None:
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(main_module, "run_mcp_server", fake_run_mcp_server)
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -266,10 +282,12 @@ def test_main_mcp_help_forwarding(monkeypatch, tmp_path) -> None:
     """Verify that 'brokk mcp --help' forwards --help as a passthrough arg."""
     captured: dict[str, Any] = {}
 
-    def fake_run_mcp_server(**kwargs: Any) -> None:
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(main_module, "run_mcp_server", fake_run_mcp_server)
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -633,11 +651,6 @@ def test_main_install_neovim_with_plugin_codecompanion_conflict_exits_nonzero(
 
 def test_main_install_verbose_does_not_prefetch_runtime(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
-    monkeypatch.setattr(
-        main_module,
-        "_run_install_prefetch",
-        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
-    )
 
     def fake_configure_zed_acp_settings(
         *, force: bool = False, settings_path=None, uvx_command=None, **_kw
@@ -698,7 +711,6 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
         *,
         force: bool = False,
         settings_path: Any = None,
-        jbang_path: Any = None,
         uvx_command: Any = None,
     ):
         captured["claude_force"] = force
@@ -709,7 +721,6 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
         *,
         force: bool = False,
         settings_path: Any = None,
-        jbang_path: Any = None,
         uvx_command: Any = None,
     ):
         captured["codex_force"] = force
@@ -759,11 +770,6 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
         fake_install_claude_mcp_summaries_skill,
     )
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
-    monkeypatch.setattr(
-        main_module,
-        "_run_install_prefetch",
-        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
-    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2905,11 +2911,6 @@ def test_install_skips_jbang_ready(monkeypatch, tmp_path) -> None:
         return tmp_path / "zed.json"
 
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(
-        main_module,
-        "_run_install_prefetch",
-        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
-    )
     monkeypatch.setattr(main_module, "configure_zed_acp_settings", fake_configure_zed_acp_settings)
     monkeypatch.setattr(
         sys,
@@ -2926,11 +2927,6 @@ def test_install_zed_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
     monkeypatch.setattr(
         main_module,
-        "_run_install_prefetch",
-        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
-    )
-    monkeypatch.setattr(
-        main_module,
         "configure_zed_acp_settings",
         lambda *, force=False, settings_path=None, uvx_command=None, **_kw: tmp_path / "zed.json",
     )
@@ -2943,11 +2939,6 @@ def test_install_mcp_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> Non
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(
-        main_module,
-        "_run_install_prefetch",
-        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
-    )
     monkeypatch.setattr(
         main_module,
         "configure_claude_code_mcp_settings",
