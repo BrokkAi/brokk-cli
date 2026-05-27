@@ -2,7 +2,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from io import StringIO
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -16,14 +16,11 @@ def _stub_install_warmup(monkeypatch, stub_api_key: bool = True) -> None:
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
     monkeypatch.setattr(main_module, "ensure_jbang_ready", lambda: "/usr/local/bin/jbang")
     monkeypatch.setattr(main_module, "_run_install_prefetch", lambda _commands: None)
-    monkeypatch.setattr(main_module, "_ensure_install_github_token", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         main_module,
         "wire_nvim_plugin_setup",
         lambda **_kwargs: SimpleNamespace(status="unsupported", path=None, detail=None),
     )
-    if stub_api_key:
-        monkeypatch.setattr(main_module, "_ensure_install_api_key", lambda: None)
 
 
 def test_main_version_subcommand_prints_version(monkeypatch, capsys) -> None:
@@ -40,189 +37,26 @@ def test_main_version_subcommand_prints_version(monkeypatch, capsys) -> None:
     assert f"brokk {__version__}" in captured.out
 
 
-def test_main_login_routes_to_run_login(monkeypatch, tmp_path) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_run_login(**kwargs: Any) -> None:
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(main_module, "run_login", fake_run_login)
+def test_main_login_subcommand_is_removed(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "login",
-            "--workspace",
-            str(tmp_path),
-            "--stdin",
-            "--skip-validate",
-        ],
+        ["brokk", "login"],
     )
 
-    main_module.main()
+    with pytest.raises(SystemExit) as exc:
+        main_module.main()
 
-    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert captured["kwargs"]["read_from_stdin"] is True
-    assert captured["kwargs"]["skip_validate"] is True
+    assert exc.value.code == 2
 
 
-def test_main_logout_routes_to_run_logout(monkeypatch) -> None:
-    called = {"value": False}
-
-    def fake_run_logout() -> None:
-        called["value"] = True
-
-    monkeypatch.setattr(main_module, "run_logout", fake_run_logout)
+def test_main_logout_subcommand_is_removed(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["brokk", "logout"])
 
-    main_module.main()
-
-    assert called["value"] is True
-
-
-@pytest.mark.asyncio
-async def test_run_login_reads_stdin_and_saves_key(monkeypatch, tmp_path) -> None:
-    from brokk_code.settings import read_brokk_properties
-
-    monkeypatch.setattr(sys, "stdin", StringIO("stdin-key\n"))
-
-    await main_module.run_login(
-        workspace_dir=tmp_path,
-        read_from_stdin=True,
-        skip_validate=True,
-    )
-
-    assert read_brokk_properties().get("brokkApiKey") == "stdin-key"
-
-
-@pytest.mark.asyncio
-async def test_run_login_stdin_requires_pipe(monkeypatch, tmp_path) -> None:
-    class FakeTtyInput(StringIO):
-        def isatty(self) -> bool:
-            return True
-
-    monkeypatch.setattr(sys, "stdin", FakeTtyInput(""))
-
     with pytest.raises(SystemExit) as exc:
-        await main_module.run_login(
-            workspace_dir=tmp_path,
-            read_from_stdin=True,
-            skip_validate=True,
-        )
+        main_module.main()
 
-    assert exc.value.code == 1
-
-
-@pytest.mark.asyncio
-async def test_run_login_interactive_path(monkeypatch, tmp_path) -> None:
-    from brokk_code.settings import read_brokk_properties
-
-    class FakeTtyInput(StringIO):
-        def isatty(self) -> bool:
-            return True
-
-    monkeypatch.setattr(sys, "stdin", FakeTtyInput(""))
-    monkeypatch.setattr(main_module, "_read_api_key_interactive", lambda: "interactive-key")
-
-    await main_module.run_login(
-        workspace_dir=tmp_path,
-        skip_validate=True,
-    )
-
-    assert read_brokk_properties().get("brokkApiKey") == "interactive-key"
-
-
-@pytest.mark.asyncio
-async def test_run_login_validation_reports_paid_balance(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setattr(sys, "stdin", StringIO("stdin-key\n"))
-
-    async def fake_validate(**_kwargs):
-        return {
-            "state": "PAID_USER",
-            "valid": True,
-            "subscribed": True,
-            "hasBalance": True,
-            "balance": 4.5,
-        }
-
-    monkeypatch.setattr(
-        main_module,
-        "_validate_brokk_api_key",
-        fake_validate,
-    )
-
-    await main_module.run_login(
-        workspace_dir=tmp_path,
-        read_from_stdin=True,
-    )
-
-    captured = capsys.readouterr()
-    assert "paid user, balance $4.50" in captured.out
-
-
-@pytest.mark.asyncio
-async def test_run_login_validation_unknown_user_exits_nonzero(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(sys, "stdin", StringIO("stdin-key\n"))
-
-    async def fake_validate(**_kwargs):
-        return {
-            "state": "UNKNOWN_USER",
-            "valid": False,
-            "subscribed": False,
-            "hasBalance": False,
-            "message": "User not found",
-        }
-
-    monkeypatch.setattr(
-        main_module,
-        "_validate_brokk_api_key",
-        fake_validate,
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        await main_module.run_login(
-            workspace_dir=tmp_path,
-            read_from_stdin=True,
-        )
-
-    assert exc.value.code == 1
-
-
-@pytest.mark.asyncio
-async def test_run_github_login_pat_interactive_uses_getpass_and_persists_token(
-    monkeypatch, tmp_path
-) -> None:
-    from brokk_code.settings import read_brokk_properties
-
-    class FakeTtyInput(StringIO):
-        def isatty(self) -> bool:
-            return True
-
-    monkeypatch.setattr(sys, "stdin", FakeTtyInput(""))
-
-    calls = {"getpass": 0, "input": 0}
-
-    def fake_getpass(prompt: str = "") -> str:
-        calls["getpass"] += 1
-        assert prompt == "GitHub Personal Access Token: "
-        return "ghp_secure_token"
-
-    def fail_input(*args, **kwargs):
-        calls["input"] += 1
-        pytest.fail("input() should not be used for interactive PAT entry")
-
-    monkeypatch.setattr(main_module.getpass, "getpass", fake_getpass)
-    monkeypatch.setattr("builtins.input", fail_input)
-
-    await main_module.run_github_login(
-        workspace_dir=tmp_path,
-        method="pat",
-    )
-
-    assert calls["getpass"] == 1
-    assert calls["input"] == 0
-    assert read_brokk_properties().get("githubToken") == "ghp_secure_token"
+    assert exc.value.code == 2
 
 
 def test_main_login_rejects_api_key_flag(monkeypatch) -> None:
@@ -232,15 +66,11 @@ def test_main_login_rejects_api_key_flag(monkeypatch) -> None:
     assert exc.value.code == 2
 
 
-def test_run_logout_removes_saved_key(monkeypatch) -> None:
-    from brokk_code.settings import read_brokk_properties, write_brokk_api_key
-
-    write_brokk_api_key("persisted-key")
-    monkeypatch.delenv("BROKK_API_KEY", raising=False)
-
-    main_module.run_logout()
-
-    assert "brokkApiKey" not in read_brokk_properties()
+def test_main_github_subcommand_is_removed(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["brokk", "github", "login"])
+    with pytest.raises(SystemExit) as exc:
+        main_module.main()
+    assert exc.value.code == 2
 
 
 def test_main_without_command_prints_help(monkeypatch, capsys) -> None:
@@ -730,13 +560,6 @@ def test_main_install_neovim_with_plugin_avante_routes_to_installer(
 
 def test_main_install_plugin_with_non_neovim_target_exits_nonzero(monkeypatch) -> None:
     _stub_install_warmup(monkeypatch)
-
-    called = {"ensure_key": False}
-
-    def fake_ensure_key():
-        called["ensure_key"] = True
-
-    monkeypatch.setattr(main_module, "_ensure_install_api_key", fake_ensure_key)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -747,19 +570,11 @@ def test_main_install_plugin_with_non_neovim_target_exits_nonzero(monkeypatch) -
         main_module.main()
 
     assert exc.value.code == 1
-    assert not called["ensure_key"], "Should not check key for invalid args"
 
 
 def test_install_neovim_invalid_selection_skips_key_prompt(monkeypatch) -> None:
-    """Verify that if Neovim plugin selection fails, API key is not prompted."""
+    """Verify that invalid Neovim plugin selection fails before writing config."""
     _stub_install_warmup(monkeypatch)
-
-    called = {"ensure_key": False}
-
-    def fake_ensure_key():
-        called["ensure_key"] = True
-
-    monkeypatch.setattr(main_module, "_ensure_install_api_key", fake_ensure_key)
 
     class FakeTtyInput(StringIO):
         def isatty(self) -> bool:
@@ -779,27 +594,6 @@ def test_install_neovim_invalid_selection_skips_key_prompt(monkeypatch) -> None:
         main_module.main()
 
     assert exc.value.code == 1
-    assert not called["ensure_key"], "Should not prompt for API key if selection is invalid"
-
-
-def test_ensure_install_api_key_treats_whitespace_as_missing(monkeypatch) -> None:
-    """Verify that a whitespace-only key in settings triggers the prompt/read path."""
-    from brokk_code.settings import Settings
-
-    monkeypatch.setattr(Settings, "get_brokk_api_key", lambda self: "   ")
-
-    prompted = {"called": False}
-
-    def fake_prompt():
-        prompted["called"] = True
-        return "new-key"
-
-    monkeypatch.setattr(main_module, "_read_api_key_interactive", fake_prompt)
-    monkeypatch.setattr(main_module, "write_brokk_api_key", lambda k: None)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-
-    main_module._ensure_install_api_key()
-    assert prompted["called"] is True
 
 
 def test_main_install_neovim_routes_to_installer(monkeypatch, tmp_path, capsys) -> None:
@@ -846,14 +640,18 @@ def test_main_install_neovim_with_plugin_codecompanion_conflict_exits_nonzero(
     assert exc.value.code == 1
 
 
-def test_main_install_verbose_prints_prefetch_command(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setattr(main_module, "resolve_jbang_binary", lambda: None)
-    prefetch_invoked: dict[str, bool] = {"called": False}
-
-    def fake_run_install_prefetch(_commands: list[tuple[str, list[str]]]) -> None:
-        prefetch_invoked["called"] = True
-
-    monkeypatch.setattr(main_module, "_run_install_prefetch", fake_run_install_prefetch)
+def test_main_install_verbose_does_not_prefetch_runtime(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
+    monkeypatch.setattr(
+        main_module,
+        "ensure_jbang_ready",
+        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_run_install_prefetch",
+        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
+    )
 
     def fake_configure_zed_acp_settings(
         *, force: bool = False, settings_path=None, uvx_command=None, **_kw
@@ -867,9 +665,8 @@ def test_main_install_verbose_prints_prefetch_command(monkeypatch, tmp_path, cap
 
     output = capsys.readouterr().out.strip().splitlines()
     assert any("Configured Zed ACP integration" in line for line in output)
-    assert any("jbang" in line for line in output)
-    assert any("--main" in line for line in output)
-    assert prefetch_invoked["called"] is False
+    assert not any("jbang" in line for line in output)
+    assert not any("--main" in line for line in output)
 
 
 def test_main_install_intellij_conflict_exits_nonzero(monkeypatch) -> None:
@@ -910,7 +707,6 @@ def test_main_install_intellij_invalid_json_exits_nonzero(monkeypatch) -> None:
 
 def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> None:
     captured: dict[str, Any] = {}
-    prefetched: dict[str, Any] = {}
 
     def fake_configure_claude_code_mcp_settings(
         *,
@@ -920,6 +716,7 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
         uvx_command: Any = None,
     ):
         captured["claude_force"] = force
+        captured["claude_uvx_command"] = uvx_command
         return tmp_path / "claude.json"
 
     def fake_configure_codex_mcp_settings(
@@ -930,10 +727,8 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
         uvx_command: Any = None,
     ):
         captured["codex_force"] = force
+        captured["codex_uvx_command"] = uvx_command
         return tmp_path / "codex.toml"
-
-    def fake_run_install_prefetch(commands: Any):
-        prefetched["commands"] = commands
 
     def fake_install_codex_mcp_workspace_skill(*, skills_path: Any = None):
         return tmp_path / ".codex" / "skills" / "brokk-mcp-workspace" / "SKILL.md"
@@ -977,8 +772,17 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
         "install_claude_mcp_summaries_skill",
         fake_install_claude_mcp_summaries_skill,
     )
-    monkeypatch.setattr(main_module, "ensure_jbang_ready", lambda: "/usr/local/bin/jbang")
-    monkeypatch.setattr(main_module, "_run_install_prefetch", fake_run_install_prefetch)
+    monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
+    monkeypatch.setattr(
+        main_module,
+        "ensure_jbang_ready",
+        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_run_install_prefetch",
+        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -990,13 +794,14 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
     output = capsys.readouterr().out
     assert captured["claude_force"] is True
     assert captured["codex_force"] is True
+    assert captured["claude_uvx_command"] == "/usr/local/bin/uvx"
+    assert captured["codex_uvx_command"] == "/usr/local/bin/uvx"
     assert "Configured Claude Code MCP integration" in output
     assert "Configured Codex MCP integration" in output
     assert "Installed Codex MCP workspace skill" in output
     assert "Installed Codex MCP summaries skill" in output
     assert "Installed Claude MCP workspace skill" in output
     assert "Installed Claude MCP summaries skill" in output
-    assert any("MCP runtime" in str(cmd[0]) for cmd in prefetched["commands"])
 
 
 def test_main_install_codex_plugin_routes_to_installer(monkeypatch, tmp_path, capsys) -> None:
@@ -1237,52 +1042,6 @@ def test_main_issue_create_verbose_routes_correctly(monkeypatch, tmp_path) -> No
     assert captured["checkout_kwargs"]["action_label"] == "Issue create"
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
     assert captured["kwargs"]["verbose"] is True
-
-
-@pytest.mark.asyncio
-async def test_run_github_login_device_flow_expires_without_terminal_state(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    class FakeExecutorManager:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-        async def start(self) -> None:
-            return None
-
-        async def wait_live(self, timeout: float = 30.0) -> bool:
-            return True
-
-        async def start_github_oauth(self) -> dict[str, Any]:
-            return {
-                "verificationUri": "https://github.com/login/device",
-                "userCode": "ABCD-EFGH",
-                "interval": 1,
-                "expiresIn": 0,
-            }
-
-        async def get_github_oauth_status(self) -> dict[str, Any]:
-            return {"state": "IDLE"}
-
-        async def stop(self) -> None:
-            return None
-
-    fake_executor_module = ModuleType("brokk_code.executor")
-    fake_executor_module.ExecutorManager = FakeExecutorManager
-    monkeypatch.setitem(sys.modules, "brokk_code.executor", fake_executor_module)
-
-    with pytest.raises(SystemExit) as exc:
-        await main_module.run_github_login(
-            workspace_dir=tmp_path,
-            method="device",
-            no_browser=True,
-        )
-
-    assert exc.value.code == 1
-    assert (
-        "timed out" in capsys.readouterr().err.lower()
-        or "expired" in capsys.readouterr().err.lower()
-    )
 
 
 @pytest.mark.asyncio
@@ -3161,32 +2920,25 @@ async def test_run_pr_review_job_exits_nonzero_on_failed_state(
     assert "PR review job ended with state FAILED" in captured.err
 
 
-def test_install_calls_ensure_jbang_ready(monkeypatch, tmp_path) -> None:
-    """install command calls ensure_jbang_ready() directly."""
-    from brokk_code.settings import write_brokk_api_key
-
-    write_brokk_api_key("test-key")
-    monkeypatch.delenv("BROKK_API_KEY", raising=False)
-
-    ensure_called = {"n": 0}
-
-    def fake_ensure_jbang_ready() -> str:
-        ensure_called["n"] += 1
-        return "/usr/bin/jbang"
-
+def test_install_skips_jbang_ready(monkeypatch, tmp_path) -> None:
+    """install command only writes config and does not warm up the Java runtime."""
     def fake_configure_zed_acp_settings(
         *, force: bool = False, uvx_command: str | None = None, **_kwargs
     ):
         return tmp_path / "zed.json"
 
-    monkeypatch.setattr(main_module, "ensure_jbang_ready", fake_ensure_jbang_ready)
-    monkeypatch.setattr(main_module, "_run_install_prefetch", lambda _commands: None)
-    monkeypatch.setattr(main_module, "configure_zed_acp_settings", fake_configure_zed_acp_settings)
+    monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
     monkeypatch.setattr(
         main_module,
-        "_build_install_prefetch_commands",
-        lambda **kwargs: [],
+        "ensure_jbang_ready",
+        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
     )
+    monkeypatch.setattr(
+        main_module,
+        "_run_install_prefetch",
+        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
+    )
+    monkeypatch.setattr(main_module, "configure_zed_acp_settings", fake_configure_zed_acp_settings)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -3195,23 +2947,21 @@ def test_install_calls_ensure_jbang_ready(monkeypatch, tmp_path) -> None:
 
     main_module.main()
 
-    assert ensure_called["n"] == 1
 
-
-def test_install_zed_skips_prompt_when_key_configured(monkeypatch, tmp_path) -> None:
-    from brokk_code.settings import write_brokk_api_key
-
-    write_brokk_api_key("existing-key")
+def test_install_zed_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
-    def fail_if_called(*args, **kwargs):
-        pytest.fail("API key read should not be called when key exists")
-
-    monkeypatch.setattr(main_module, "_read_api_key_interactive", fail_if_called)
-    monkeypatch.setattr(main_module, "_read_api_key_from_stdin", fail_if_called)
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(main_module, "ensure_jbang_ready", lambda: "/usr/bin/jbang")
-    monkeypatch.setattr(main_module, "_run_install_prefetch", lambda _commands: None)
+    monkeypatch.setattr(
+        main_module,
+        "ensure_jbang_ready",
+        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_run_install_prefetch",
+        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
+    )
     monkeypatch.setattr(
         main_module,
         "configure_zed_acp_settings",
@@ -3222,20 +2972,20 @@ def test_install_zed_skips_prompt_when_key_configured(monkeypatch, tmp_path) -> 
     main_module.main()
 
 
-def test_install_mcp_skips_prompt_when_key_configured(monkeypatch, tmp_path) -> None:
-    from brokk_code.settings import write_brokk_api_key
-
-    write_brokk_api_key("existing-key")
+def test_install_mcp_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
-    def fail_if_called(*args, **kwargs):
-        pytest.fail("API key read should not be called when key exists")
-
-    monkeypatch.setattr(main_module, "_read_api_key_interactive", fail_if_called)
-    monkeypatch.setattr(main_module, "_read_api_key_from_stdin", fail_if_called)
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(main_module, "ensure_jbang_ready", lambda: "/usr/bin/jbang")
-    monkeypatch.setattr(main_module, "_run_install_prefetch", lambda _commands: None)
+    monkeypatch.setattr(
+        main_module,
+        "ensure_jbang_ready",
+        lambda: (_ for _ in ()).throw(AssertionError("jbang should not be required")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_run_install_prefetch",
+        lambda _commands: (_ for _ in ()).throw(AssertionError("prefetch should not run")),
+    )
     monkeypatch.setattr(
         main_module,
         "configure_claude_code_mcp_settings",
@@ -3256,17 +3006,27 @@ def test_install_mcp_skips_prompt_when_key_configured(monkeypatch, tmp_path) -> 
         "install_codex_mcp_summaries_skill",
         lambda **_kw: tmp_path / "s2",
     )
+    monkeypatch.setattr(
+        main_module,
+        "install_claude_mcp_workspace_skill",
+        lambda **_kw: tmp_path / "s3",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "install_claude_mcp_summaries_skill",
+        lambda **_kw: tmp_path / "s4",
+    )
 
     monkeypatch.setattr(sys, "argv", ["brokk", "install", "mcp"])
     main_module.main()
 
 
-def test_install_zed_with_missing_key_interactive_persists_key(
+def test_install_zed_with_missing_key_interactive_does_not_read_key(
     monkeypatch,
     tmp_path,
     capsys,
 ) -> None:
-    """Verify that 'install zed' prompts for a key if missing in TTY and saves it."""
+    """Verify that 'install zed' does not prompt for auth in TTY sessions."""
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
     class FakeTtyInput(StringIO):
@@ -3274,7 +3034,6 @@ def test_install_zed_with_missing_key_interactive_persists_key(
             return True
 
     monkeypatch.setattr(sys, "stdin", FakeTtyInput(""))
-    monkeypatch.setattr(main_module, "_read_api_key_interactive", lambda: "new-interactive-key")
     _stub_install_warmup(monkeypatch, stub_api_key=False)
 
     def fake_configure_zed(*args, **kwargs):
@@ -3286,18 +3045,16 @@ def test_install_zed_with_missing_key_interactive_persists_key(
     main_module.main()
 
     out = capsys.readouterr().out
-    assert "Saved Brokk API key" in out
-    from brokk_code.settings import read_brokk_properties
-
-    assert read_brokk_properties().get("brokkApiKey") == "new-interactive-key"
+    assert "Configured Zed ACP" in out
+    assert "Saved Brokk API key" not in out
 
 
-def test_install_intellij_with_missing_key_piped_persists_key(
+def test_install_intellij_with_missing_key_piped_does_not_read_key(
     monkeypatch,
     tmp_path,
     capsys,
 ) -> None:
-    """Verify that 'install intellij' reads from stdin if missing key and not a TTY."""
+    """Verify that 'install intellij' ignores stdin auth data."""
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
     monkeypatch.setattr(sys, "stdin", StringIO("piped-key\n"))
@@ -3315,18 +3072,16 @@ def test_install_intellij_with_missing_key_piped_persists_key(
     main_module.main()
 
     out = capsys.readouterr().out
-    assert "Saved Brokk API key" in out
-    from brokk_code.settings import read_brokk_properties
-
-    assert read_brokk_properties().get("brokkApiKey") == "piped-key"
+    assert "Configured IntelliJ ACP" in out
+    assert "Saved Brokk API key" not in out
 
 
-def test_install_mcp_with_missing_key_piped_persists_key(
+def test_install_mcp_with_missing_key_piped_does_not_read_key(
     monkeypatch,
     tmp_path,
     capsys,
 ) -> None:
-    """Verify that 'install mcp' reads from stdin if missing key and not a TTY."""
+    """Verify that 'install mcp' ignores stdin auth data."""
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
     monkeypatch.setattr(sys, "stdin", StringIO("mcp-piped-key\n"))
@@ -3353,43 +3108,51 @@ def test_install_mcp_with_missing_key_piped_persists_key(
         "install_codex_mcp_summaries_skill",
         lambda **_kw: tmp_path / "s2",
     )
+    monkeypatch.setattr(
+        main_module,
+        "install_claude_mcp_workspace_skill",
+        lambda **_kw: tmp_path / "s3",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "install_claude_mcp_summaries_skill",
+        lambda **_kw: tmp_path / "s4",
+    )
 
     monkeypatch.setattr(sys, "argv", ["brokk", "install", "mcp"])
 
     main_module.main()
 
     out = capsys.readouterr().out
-    assert "Saved Brokk API key" in out
-    from brokk_code.settings import read_brokk_properties
+    assert "Configured Claude Code MCP" in out
+    assert "Configured Codex MCP" in out
+    assert "Saved Brokk API key" not in out
 
-    assert read_brokk_properties().get("brokkApiKey") == "mcp-piped-key"
 
-
-def test_install_fails_with_empty_stdin(monkeypatch, tmp_path) -> None:
-    """Verify that install exits non-zero if key is missing and stdin is empty."""
+def test_install_continues_with_empty_stdin(monkeypatch, tmp_path, capsys) -> None:
+    """Verify that install does not require auth data on stdin."""
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
     monkeypatch.setattr(sys, "stdin", StringIO(""))
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
 
     monkeypatch.setattr(sys, "argv", ["brokk", "install", "zed"])
+    _stub_install_warmup(monkeypatch, stub_api_key=False)
+    monkeypatch.setattr(
+        main_module,
+        "configure_zed_acp_settings",
+        lambda *, force=False, settings_path=None, uvx_command=None, **_kw: tmp_path / "zed.json",
+    )
 
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
+    main_module.main()
 
-    assert exc.value.code == 1
+    assert "Configured Zed ACP" in capsys.readouterr().out
 
 
 def test_install_continues_when_key_already_configured(monkeypatch, tmp_path, capsys) -> None:
-    """Verify that install does not prompt or read stdin if key is already in env/props."""
+    """Verify that install ignores auth state and only writes config."""
     # Set key in env
     monkeypatch.setenv("BROKK_API_KEY", "existing-env-key")
-
-    def fail_if_called(*args, **kwargs):
-        pytest.fail("API key read should not be called when key exists")
-
-    monkeypatch.setattr(main_module, "_read_api_key_interactive", fail_if_called)
-    monkeypatch.setattr(main_module, "_read_api_key_from_stdin", fail_if_called)
 
     _stub_install_warmup(monkeypatch)
     monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
