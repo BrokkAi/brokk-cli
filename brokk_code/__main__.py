@@ -868,32 +868,8 @@ def _temporary_issue_repo_checkout(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Brokk Code - Interactive Terminal Interface")
     _add_common_runtime_args(parser)
-    parser.add_argument(
-        "--session",
-        type=str,
-        default=None,
-        help="Attempt to resume a specific session by ID",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        dest="resume_session",
-        default=False,
-        help="Resume the last used session instead of creating a new one",
-    )
 
     subparsers = parser.add_subparsers(dest="command")
-
-    resume_parser = subparsers.add_parser("resume", help="Resume a specific session")
-    _add_common_runtime_args(resume_parser)
-    resume_parser.add_argument(
-        "session_id",
-        type=str,
-        help="The ID of the session to resume",
-    )
-
-    sessions_parser = subparsers.add_parser("sessions", help="List and switch between sessions")
-    _add_common_runtime_args(sessions_parser)
 
     acp_parser = subparsers.add_parser(
         "acp", help="Run in ACP server mode (native Java agent over stdio JSON-RPC)"
@@ -1957,6 +1933,10 @@ def main():
     if unknown and args.command not in ("mcp", "mcp-core", "bifrost"):
         parser.error(f"unrecognized arguments: {' '.join(unknown)}")
 
+    if args.command is None:
+        parser.print_help()
+        return
+
     # Resolve paths early so they are available to all commands
     workspace_path = Path(args.workspace).resolve()
     jar_path = Path(args.jar).resolve() if args.jar else None
@@ -2486,25 +2466,6 @@ def _main_dispatch(
         )
         return
 
-    try:
-        from brokk_code.app import BrokkApp
-    except ImportError:
-        print("Error: Could not import BrokkApp. Is app.py missing?")
-        sys.exit(1)
-
-    session_id = getattr(args, "session", None)
-    resume_session = getattr(args, "resume_session", False)
-    pick_session = False
-
-    if args.command == "resume":
-        session_id = args.session_id
-        resume_session = False  # Explicitly using the provided ID, not "last session" logic
-    elif args.command == "sessions":
-        # For explicit session picking, ignore any resume hints; the picker should run regardless.
-        pick_session = True
-        session_id = None
-        resume_session = False
-
     if args.command == "exec":
         workspace_path = resolve_workspace_dir(workspace_path)
         asyncio.run(
@@ -2626,61 +2587,6 @@ def _main_dispatch(
                 build_settings=args.build_settings,
             )
             return
-
-    if not workspace_path.exists():
-        print(f"Error: Workspace path does not exist: {workspace_path}")
-        sys.exit(1)
-    workspace_path = resolve_workspace_dir(workspace_path)
-
-    app = BrokkApp(
-        workspace_dir=workspace_path,
-        jar_path=jar_path,
-        executor_version=args.executor_version,
-        executor_snapshot=args.executor_snapshot,
-        session_id=session_id,
-        resume_session=resume_session,
-        pick_session=pick_session,
-        vendor=args.vendor,
-    )
-    try:
-        app.run()
-    finally:
-        # Best-effort cleanup for abnormal TUI exits (e.g., KeyboardInterrupt / runtime errors)
-        # so the Java executor and Windows asyncio pipe transports do not linger.
-        try:
-            if app.executor.check_alive():
-                asyncio.run(app.executor.stop())
-        except Exception:
-            pass
-
-    get_renderables = getattr(app, "get_exit_transcript_renderables", None)
-    transcript_renderables = get_renderables() if callable(get_renderables) else []
-    get_transcript = getattr(app, "get_exit_transcript", None)
-    transcript = get_transcript().strip() if callable(get_transcript) else ""
-    if transcript_renderables:
-        console = Console()
-        for renderable in transcript_renderables:
-            if renderable == "":
-                console.print()
-            else:
-                console.print(renderable)
-        console.print()
-    elif transcript:
-        print(transcript)
-        print()
-
-    # Print resume hint on exit if the session has tasks
-    from brokk_code.session_persistence import (
-        get_session_zip_resume_path,
-        has_tasks,
-        load_last_session_id,
-    )
-
-    last_id = load_last_session_id(workspace_path)
-    if last_id:
-        zip_path = get_session_zip_resume_path(workspace_path, last_id)
-        if has_tasks(zip_path):
-            print(f"brokk resume {last_id}")
 
 
 if __name__ == "__main__":

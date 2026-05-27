@@ -243,39 +243,15 @@ def test_run_logout_removes_saved_key(monkeypatch) -> None:
     assert "brokkApiKey" not in read_brokk_properties()
 
 
-def test_main_defaults_to_tui(monkeypatch, tmp_path) -> None:
-    captured: dict[str, Any] = {"ran": False}
-    fake_app_module = ModuleType("brokk_code.app")
-
-    class FakeApp:
-        def __init__(self, **kwargs: Any):
-            captured["kwargs"] = kwargs
-
-        def run(self) -> None:
-            captured["ran"] = True
-
-    fake_app_module.BrokkApp = FakeApp
-    monkeypatch.setitem(sys.modules, "brokk_code.app", fake_app_module)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "--workspace",
-            str(tmp_path),
-            "--session",
-            "session-1",
-            "--vendor",
-            "OpenAI",
-        ],
-    )
+def test_main_without_command_prints_help(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["brokk"])
 
     main_module.main()
 
-    assert captured["ran"] is True
-    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert captured["kwargs"]["session_id"] == "session-1"
-    assert captured["kwargs"]["vendor"] == "OpenAI"
+    captured = capsys.readouterr()
+    assert "usage: brokk" in captured.out
+    assert "acp" in captured.out
+    assert "Launch the interactive TUI" not in captured.out
 
 
 def test_main_acp_routes_to_native_launcher(monkeypatch, tmp_path) -> None:
@@ -1064,158 +1040,14 @@ def test_main_install_codex_plugin_routes_to_installer(monkeypatch, tmp_path, ca
     assert "Restart Codex" in output
 
 
-def test_main_uses_git_repo_root_for_nested_workspace(monkeypatch, tmp_path) -> None:
-    captured: dict[str, Any] = {"ran": False}
-    fake_app_module = ModuleType("brokk_code.app")
-    repo_root = tmp_path / "repo"
-    nested_workspace = repo_root / "src" / "feature"
-    nested_workspace.mkdir(parents=True)
-    (repo_root / ".git").mkdir()
+def test_main_rejects_removed_tui_commands(monkeypatch) -> None:
+    for command in ("resume", "sessions"):
+        monkeypatch.setattr(sys, "argv", ["brokk", command])
 
-    class FakeApp:
-        def __init__(self, **kwargs: Any):
-            captured["kwargs"] = kwargs
+        with pytest.raises(SystemExit) as exc:
+            main_module.main()
 
-        def run(self) -> None:
-            captured["ran"] = True
-
-    fake_app_module.BrokkApp = FakeApp
-    monkeypatch.setitem(sys.modules, "brokk_code.app", fake_app_module)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "--workspace",
-            str(nested_workspace),
-        ],
-    )
-
-    main_module.main()
-
-    assert captured["ran"] is True
-    assert captured["kwargs"]["workspace_dir"] == repo_root.resolve()
-
-
-def test_main_keeps_workspace_when_not_in_git_repo(monkeypatch, tmp_path) -> None:
-    captured: dict[str, Any] = {"ran": False}
-    fake_app_module = ModuleType("brokk_code.app")
-    nested_workspace = tmp_path / "workspace" / "src"
-    nested_workspace.mkdir(parents=True)
-
-    class FakeApp:
-        def __init__(self, **kwargs: Any):
-            captured["kwargs"] = kwargs
-
-        def run(self) -> None:
-            captured["ran"] = True
-
-    fake_app_module.BrokkApp = FakeApp
-    monkeypatch.setitem(sys.modules, "brokk_code.app", fake_app_module)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "--workspace",
-            str(nested_workspace),
-        ],
-    )
-
-    main_module.main()
-
-    assert captured["ran"] is True
-    assert captured["kwargs"]["workspace_dir"] == nested_workspace.resolve()
-
-
-def test_main_resume_routes_correctly(monkeypatch, tmp_path) -> None:
-    captured: dict[str, Any] = {"ran": False}
-    fake_app_module = ModuleType("brokk_code.app")
-
-    class FakeApp:
-        def __init__(self, **kwargs: Any):
-            captured["kwargs"] = kwargs
-
-        def run(self) -> None:
-            captured["ran"] = True
-
-    fake_app_module.BrokkApp = FakeApp
-    monkeypatch.setitem(sys.modules, "brokk_code.app", fake_app_module)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "resume",
-            "session-xyz",
-            "--workspace",
-            str(tmp_path),
-            "--vendor",
-            "Anthropic",
-        ],
-    )
-
-    main_module.main()
-
-    assert captured["ran"] is True
-    assert captured["kwargs"]["session_id"] == "session-xyz"
-    assert captured["kwargs"]["resume_session"] is False
-    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert captured["kwargs"]["vendor"] == "Anthropic"
-
-
-def test_main_sessions_routes_correctly(monkeypatch, tmp_path) -> None:
-    captured: dict[str, Any] = {"ran": False}
-    fake_app_module = ModuleType("brokk_code.app")
-
-    class FakeApp:
-        def __init__(self, **kwargs: Any):
-            captured["kwargs"] = kwargs
-
-        def run(self) -> None:
-            captured["ran"] = True
-
-    fake_app_module.BrokkApp = FakeApp
-    monkeypatch.setitem(sys.modules, "brokk_code.app", fake_app_module)
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "sessions",
-            "--workspace",
-            str(tmp_path),
-            "--vendor",
-            "OpenAI",
-        ],
-    )
-
-    main_module.main()
-
-    assert captured["ran"] is True
-    # pick_session must be True for the sessions command
-    assert captured["kwargs"]["pick_session"] is True
-    # workspace_dir should be resolved
-    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    # vendor should be passed through
-    assert captured["kwargs"]["vendor"] == "OpenAI"
-    # sessions command overrides session_id and resume_session
-    assert captured["kwargs"]["session_id"] is None
-    assert captured["kwargs"]["resume_session"] is False
-
-
-def test_main_sessions_rejects_positional_args(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["brokk", "sessions", "unexpected-arg", "--workspace", str(tmp_path)],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
-
-    assert exc.value.code == 2
+        assert exc.value.code == 2
 
 
 def test_main_issue_create_routes_correctly(monkeypatch, tmp_path) -> None:
