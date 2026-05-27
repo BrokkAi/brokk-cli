@@ -5,7 +5,7 @@ or locate either binary; it writes the literal names into the config and relies
 on the editor inheriting a PATH that finds them at agent-launch time. Pass
 `--brokk-acp-binary PATH` to override `brokk-acp`.
 
-For the `brokk bifrost` MCP subcommand, `resolve_bifrost_binary` prefers (in
+For the `brokk mcp` MCP subcommand, `resolve_bifrost_binary` prefers (in
 order): explicit override, an entry on `$PATH` whose `--version` output matches
 `BUNDLED_BIFROST_VERSION`, then a downloaded-and-cached release binary pinned
 to that same version. Cached binaries live under
