@@ -54,6 +54,8 @@ brokk
 python -m brokk_code
 ```
 
+Running `brokk` without a subcommand prints the help menu.
+
 ### Login and Logout (Brokk API Key)
 
 Interactive login (masked input):
@@ -99,22 +101,6 @@ Get-Clipboard | uv run brokk login --stdin
 xclip -o -selection clipboard | uv run brokk login --stdin
 ```
 
-### Resuming Sessions
-
-Brokk automatically saves your session state (fragments, history, etc.) when you exit.
-
-**Resume the last session in the current workspace:**
-```bash
-brokk --resume
-```
-
-**Resume a specific session by ID:**
-```bash
-brokk resume <session_id>
-```
-*Note: When you exit `brokk`, it prints a convenient "resume hint" command for the session you just finished, for example:*
-`brokk resume <session_id>`
-
 ### ACP Mode
 
 Run the official ACP server mode over stdio:
@@ -123,7 +109,7 @@ Run the official ACP server mode over stdio:
 uv run brokk acp
 ```
 
-This mode is headless and intended for ACP-compatible clients. The default `brokk` command still launches the interactive TUI.
+This mode is headless and intended for ACP-compatible clients.
 
 ### Bifrost MCP Mode
 
@@ -211,18 +197,16 @@ require("avante").setup(vim.tbl_deep_extend("force", brokk, {
 ### Options
 
 - `--workspace <path>`: Specify the workspace directory (defaults to current directory).
-- `--resume`: Resume the last used session in the current workspace.
-- `--session <id>`: Attempt to resume a specific session ID (similar to the `resume` command).
 - `--executor-version <tag>`: Specify a version/tag of the executor to download (e.g., `v0.1.0`).
 - `--executor-snapshot`: Download the latest snapshot release instead of the stable release (ignored if `--executor-version` is set).
 - `--jar <path>`: Specify a custom path to `brokk.jar`. This **overrides** all version/download logic.
 
 ### Selecting an Executor Version
 
-By default, `brokk` downloads the latest stable release to `~/.brokk/brokk.jar`. You can pin a specific version using the `--executor-version` flag:
+Commands that launch the executor download the latest stable release to `~/.brokk/brokk.jar`. You can pin a specific version using the `--executor-version` flag:
 
 ```bash
-uv run brokk --executor-version v0.1.0
+uv run brokk acp --executor-version v0.1.0
 ```
 
 Versioned JARs are cached at `~/.brokk/brokk-<tag>.jar`.
