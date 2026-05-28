@@ -179,6 +179,7 @@ async def _run_anvil_text_prompt(
     anvil_binary: Path | None,
     anvil_version: str,
     progress_label: str,
+    verbose: bool = False,
 ) -> str:
     manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
@@ -192,26 +193,56 @@ async def _run_anvil_text_prompt(
         transcript: list[str] = []
         last_error: str | None = None
         last_state: str | None = None
+        token_output_open = False
+
+        def _print_verbose_event(event: dict[str, Any], text: str) -> None:
+            nonlocal token_output_open
+            event_type = str(event.get("type") or "UNKNOWN")
+            data = safe_data(event)
+            if event_type in {"TOKEN", "LLM_TOKEN"}:
+                if text:
+                    sys.stderr.write(text)
+                    sys.stderr.flush()
+                    token_output_open = True
+                return
+            if token_output_open:
+                sys.stderr.write("\n")
+                token_output_open = False
+            payload = data if data else {k: v for k, v in event.items() if k != "type"}
+            if payload:
+                rendered = json.dumps(payload, ensure_ascii=True, default=str)
+                print(f"[{event_type}] {rendered}", file=sys.stderr)
+            else:
+                print(f"[{event_type}]", file=sys.stderr)
+
         _print_progress(f"Submitting {progress_label} prompt to Anvil...")
         async for event in manager.run_prompt(
             prompt,
             model=model,
             reasoning_effort=reasoning_effort,
         ):
-            text = _extract_event_text(event)
-            if text:
-                transcript.append(text)
             event_type = event.get("type")
             data = safe_data(event)
+            if event_type in {"TOKEN", "LLM_TOKEN"}:
+                text = str(data.get("token", event.get("text", "")))
+            else:
+                text = _extract_event_text(event)
+            if verbose:
+                _print_verbose_event(event, text)
+            if text:
+                transcript.append(text)
             if event_type == "ERROR":
                 last_error = text or "unknown error"
             elif event_type == "STATE_CHANGE":
                 last_state = str(data.get("state", event.get("state", "UNKNOWN")))
+        if token_output_open:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
 
         if last_error or (last_state and is_failure_state(last_state)):
             detail = f": {last_error}" if last_error else ""
             raise HeadlessAnvilError(f"{progress_label} failed{detail}")
-        return "\n".join(transcript).strip()
+        return "".join(transcript).strip()
     finally:
         await manager.stop()
 
@@ -920,6 +951,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Commit message (optional; if omitted, a message will be generated)",
     )
     _add_anvil_selection_args(commit_parser)
+    commit_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Show full Anvil ACP output (events/tokens) for debugging",
+    )
 
     exec_parser = subparsers.add_parser(
         "exec", help="Run a prompt with LITE_AGENT (scan + architect, no build)"
@@ -1024,6 +1062,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Source/head branch (defaults to current branch)",
     )
     _add_anvil_selection_args(pr_create_parser)
+    pr_create_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Show full Anvil ACP output (events/tokens) for debugging",
+    )
     pr_review_parser = pr_subparsers.add_parser("review", help="Review a pull request")
     _add_common_runtime_args(pr_review_parser)
     pr_review_parser.add_argument(
@@ -1071,6 +1116,7 @@ async def run_commit(
     message: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    verbose: bool = False,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
@@ -1094,6 +1140,7 @@ async def run_commit(
                 anvil_binary=anvil_binary,
                 anvil_version=anvil_version,
                 progress_label="commit message",
+                verbose=verbose,
             )
         if not commit_message:
             _die("Anvil did not return a commit message")
@@ -1130,6 +1177,7 @@ async def _derive_pr_create_text(
     reasoning_effort: str | None,
     anvil_binary: Path | None,
     anvil_version: str,
+    verbose: bool = False,
 ) -> tuple[str, str]:
     if title and title.strip() and body and body.strip():
         return title.strip(), body.strip()
@@ -1146,6 +1194,7 @@ async def _derive_pr_create_text(
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
         progress_label="PR description",
+        verbose=verbose,
     )
     data = _extract_json_object(text)
     final_title = title.strip() if title and title.strip() else _json_string_field(data, "title")
@@ -1161,6 +1210,7 @@ async def run_pr_create(
     head_branch: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    verbose: bool = False,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
@@ -1176,6 +1226,7 @@ async def run_pr_create(
             reasoning_effort=reasoning_effort,
             anvil_binary=anvil_binary,
             anvil_version=anvil_version,
+            verbose=verbose,
         )
         pr_url = _create_github_pr(
             title=pr_title,
@@ -1235,6 +1286,7 @@ async def run_pr_review_job(
             anvil_binary=anvil_binary,
             anvil_version=anvil_version,
             progress_label=f"PR review #{pr_number}",
+            verbose=verbose,
         )
         review = _extract_json_object(review_text)
         review_body = _format_pr_review_body(review, severity_threshold=severity_threshold)
@@ -1493,21 +1545,24 @@ async def run_headless_job(
 
         _clear_spinner()
         if mode == "ISSUE_WRITER":
+            draft_text = "".join(transcript).strip()
             try:
-                draft = _extract_json_object("\n".join(transcript))
-                issue_url = _create_github_issue(
-                    repo_owner=tags["repo_owner"],
-                    repo_name=tags["repo_name"],
-                    title=_json_string_field(draft, "title"),
-                    body=_json_string_field(draft, "body"),
-                    cwd=workspace_dir,
-                )
+                draft = _extract_json_object(draft_text)
+                issue_title = _json_string_field(draft, "title")
+                issue_body = _json_string_field(draft, "body")
             except ValueError as e:
                 print(f"Anvil ACP error during {mode} job: {e}", file=sys.stderr)
                 sys.exit(1)
+            issue_url = _create_github_issue(
+                repo_owner=tags["repo_owner"],
+                repo_name=tags["repo_name"],
+                title=issue_title,
+                body=issue_body,
+                cwd=workspace_dir,
+            )
             print(f"Issue created: {issue_url}")
         elif mode == "ISSUE_DIAGNOSE":
-            diagnosis = "\n".join(transcript).strip()
+            diagnosis = "".join(transcript).strip()
             if not diagnosis:
                 print(f"Anvil ACP error during {mode} job: empty diagnosis", file=sys.stderr)
                 sys.exit(1)
@@ -1947,6 +2002,7 @@ def _main_dispatch(
                 message=args.message,
                 model=selection.model,
                 reasoning_effort=selection.reasoning_effort,
+                verbose=args.verbose,
                 anvil_binary=args.anvil_binary,
                 anvil_version=args.anvil_version,
             )
@@ -1972,6 +2028,7 @@ def _main_dispatch(
                     head_branch=args.head,
                     model=selection.model,
                     reasoning_effort=selection.reasoning_effort,
+                    verbose=args.verbose,
                     anvil_binary=args.anvil_binary,
                     anvil_version=args.anvil_version,
                 )

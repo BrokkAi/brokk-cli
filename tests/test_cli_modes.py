@@ -72,6 +72,36 @@ def _stub_install_warmup(monkeypatch, stub_api_key: bool = True) -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_run_anvil_text_prompt_verbose_prints_acp_events(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "LLM_TOKEN", "data": {"token": '{"title":"T"'}},
+            {"type": "LLM_TOKEN", "data": {"token": ',"body":"B"}'}},
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+
+    text = await main_module._run_anvil_text_prompt(
+        workspace_dir=tmp_path,
+        prompt="draft",
+        model="test-model",
+        reasoning_effort="medium",
+        anvil_binary=None,
+        anvil_version="test-version",
+        progress_label="test prompt",
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    assert text == '{"title":"T","body":"B"}'
+    assert '{"title":"T","body":"B"}' in captured.err
+    assert '[STATE_CHANGE] {"state": "COMPLETED"}' in captured.err
+
+
 def test_main_version_subcommand_prints_version(monkeypatch, capsys) -> None:
     """Verify `brokk version` prints the package version and exits cleanly."""
     from brokk_code import __version__
@@ -1293,7 +1323,7 @@ async def test_run_headless_job_exits_when_issue_json_is_invalid(
     _patch_headless_client(
         monkeypatch,
         events=[
-            {"type": "LLM_TOKEN", "data": {"token": "not json"}},
+            {"type": "LLM_TOKEN", "data": {"token": "# Add mj subcommand\n\nInstall mjolnir."}},
             {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
         ],
     )
@@ -1751,6 +1781,7 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
             "gpt-test",
             "--reasoning-effort",
             "low",
+            "--verbose",
         ],
     )
 
@@ -1764,6 +1795,7 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["head_branch"] == "feature-branch"
     assert captured["kwargs"]["model"] == "gpt-test"
     assert captured["kwargs"]["reasoning_effort"] == "low"
+    assert captured["kwargs"]["verbose"] is True
 
 
 def test_main_pr_create_omitted_title_body_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -1792,6 +1824,7 @@ def test_main_pr_create_omitted_title_body_routes_correctly(monkeypatch, tmp_pat
     assert captured["ran"] is True
     assert captured["kwargs"]["title"] is None
     assert captured["kwargs"]["body"] is None
+    assert captured["kwargs"]["verbose"] is False
 
 
 def test_main_pr_create_missing_subcommand_exits_nonzero(monkeypatch, tmp_path) -> None:
@@ -1858,6 +1891,7 @@ async def test_run_pr_create_derives_title_when_missing(monkeypatch, tmp_path) -
     assert "Explicit Body" in captured_anvil["prompt"]
     assert captured_pr["title"] == "Generated title"
     assert captured_pr["body"] == "Explicit Body"
+    assert captured_anvil["verbose"] is False
 
 
 @pytest.mark.asyncio
@@ -1885,15 +1919,39 @@ async def test_run_pr_create_derives_title_body_and_uses_branches(
         body=None,
         base_branch="main",
         head_branch="feature-xyz",
+        verbose=True,
     )
 
     assert "Use `main` as the base branch." in captured_anvil["prompt"]
     assert "Use `feature-xyz` as the head branch." in captured_anvil["prompt"]
     assert "Derive a clear pull request title" in captured_anvil["prompt"]
     assert "Derive a useful Markdown pull request body" in captured_anvil["prompt"]
+    assert captured_anvil["verbose"] is True
     assert captured_pr["base_branch"] == "main"
     assert captured_pr["head_branch"] == "feature-xyz"
     assert "https://github.com/org/repo/pull/777" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_run_pr_create_exits_when_anvil_json_is_invalid(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """Verifies run_pr_create rejects non-JSON ACP output."""
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        return "# PR title\n\nApproximate body"
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_pr_create(
+            workspace_dir=tmp_path,
+            title=None,
+            body=None,
+        )
+
+    assert exc.value.code == 1
+    assert "valid JSON object" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
@@ -1939,6 +1997,7 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
             "gpt-test",
             "--reasoning-effort",
             "medium",
+            "--verbose",
         ],
     )
 
@@ -1949,6 +2008,7 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["message"] == "Fix the bug"
     assert captured["kwargs"]["model"] == "gpt-test"
     assert captured["kwargs"]["reasoning_effort"] == "medium"
+    assert captured["kwargs"]["verbose"] is True
 
 
 def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -1975,6 +2035,7 @@ def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
     assert captured["kwargs"]["message"] is None
+    assert captured["kwargs"]["verbose"] is False
 
 
 def test_main_commit_uses_anvil_config_when_flags_omitted(monkeypatch, tmp_path) -> None:
@@ -2073,9 +2134,15 @@ async def test_run_commit_uses_anvil_for_missing_message(monkeypatch, tmp_path) 
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
-    await main_module.run_commit(workspace_dir=tmp_path, message=None, model="gpt-test")
+    await main_module.run_commit(
+        workspace_dir=tmp_path,
+        message=None,
+        model="gpt-test",
+        verbose=True,
+    )
 
     assert captured["model"] == "gpt-test"
+    assert captured["verbose"] is True
     assert "derive one concise git commit" in captured["prompt"]
 
 
@@ -2531,10 +2598,12 @@ async def test_run_pr_review_job_submits_anvil_prompt(monkeypatch, tmp_path) -> 
         repo_name="test-repo",
         model="gpt-4",
         reasoning_effort="medium",
+        verbose=True,
     )
 
     assert captured_anvil["model"] == "gpt-4"
     assert captured_anvil["reasoning_effort"] == "medium"
+    assert captured_anvil["verbose"] is True
     assert "test-owner/test-repo" in captured_anvil["prompt"]
     assert "pull request #42" in captured_anvil["prompt"].lower()
     assert captured_review["repo_owner"] == "test-owner"
