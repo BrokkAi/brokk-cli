@@ -102,6 +102,37 @@ async def test_run_anvil_text_prompt_verbose_prints_acp_events(
     assert '[STATE_CHANGE] {"state": "COMPLETED"}' in captured.err
 
 
+@pytest.mark.asyncio
+async def test_run_anvil_text_prompt_ignores_non_token_events(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "Read file"}},
+            {"type": "TOOL_OUTPUT", "data": {"text": "Tool status: completed"}},
+            {"type": "LLM_TOKEN", "data": {"token": "final answer"}},
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+
+    text = await main_module._run_anvil_text_prompt(
+        workspace_dir=tmp_path,
+        prompt="draft",
+        model=None,
+        reasoning_effort=None,
+        anvil_binary=None,
+        anvil_version="test-version",
+        progress_label="test prompt",
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    assert text == "final answer"
+    assert "[NOTIFICATION]" in captured.err
+    assert "[TOOL_OUTPUT]" in captured.err
+
+
 def test_main_version_subcommand_prints_version(monkeypatch, capsys) -> None:
     """Verify `brokk version` prints the package version and exits cleanly."""
     from brokk_code import __version__
@@ -1340,6 +1371,78 @@ async def test_run_headless_job_exits_when_issue_json_is_invalid(
     captured = capsys.readouterr()
     assert exc.value.code == 1
     assert "valid JSON object" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_run_headless_job_issue_diagnose_posts_only_agent_text(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    captured_comment: dict[str, Any] = {}
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "Read src/app.rs"}},
+            {"type": "TOOL_OUTPUT", "data": {"text": "Tool status: completed"}},
+            {"type": "COMMAND_RESULT", "data": {"output": "grep output"}},
+            {"type": "LLM_TOKEN", "data": {"token": "The bug is in event rendering."}},
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_post_github_issue_comment",
+        lambda **kwargs: (
+            captured_comment.update(kwargs)
+            or "https://github.com/brokkai/brokk/issues/9#issuecomment-1"
+        ),
+    )
+
+    await main_module.run_headless_job(
+        workspace_dir=tmp_path,
+        task_input="Diagnose issue",
+        model="test-model",
+        mode="ISSUE_DIAGNOSE",
+        tags={**ISSUE_TAGS, "issue_number": "9"},
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "Diagnosis posted to issue #9." in captured.out
+    assert "[INFO] Read src/app.rs" in captured.out
+    assert "[TOOL_OUTPUT]" in captured.out
+    assert "The bug is in event rendering." in captured_comment["body"]
+    assert "Read src/app.rs" not in captured_comment["body"]
+    assert "Tool status: completed" not in captured_comment["body"]
+    assert "grep output" not in captured_comment["body"]
+
+
+@pytest.mark.asyncio
+async def test_run_headless_job_issue_diagnose_exits_when_no_agent_text(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "Read src/app.rs"}},
+            {"type": "TOOL_OUTPUT", "data": {"text": "Tool status: completed"}},
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_headless_job(
+            workspace_dir=tmp_path,
+            task_input="Diagnose issue",
+            model="test-model",
+            mode="ISSUE_DIAGNOSE",
+            tags={**ISSUE_TAGS, "issue_number": "9"},
+            verbose=True,
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "no agent response text received" in captured.err
+    assert "Diagnosis posted" not in captured.out
 
 
 def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:

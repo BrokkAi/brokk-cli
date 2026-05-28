@@ -129,6 +129,10 @@ class HeadlessAcpClient:
         if reasoning_effort:
             await self.set_config_option(ANVIL_REASONING_EFFORT_CONFIG_ID, reasoning_effort)
 
+        while not self._events.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._events.get_nowait()
+
         prompt_task = asyncio.create_task(
             self._connection.prompt(
                 prompt=[text_block(prompt)],

@@ -229,7 +229,7 @@ async def _run_anvil_text_prompt(
                 text = _extract_event_text(event)
             if verbose:
                 _print_verbose_event(event, text)
-            if text:
+            if event_type in {"TOKEN", "LLM_TOKEN"} and text:
                 transcript.append(text)
             if event_type == "ERROR":
                 last_error = text or "unknown error"
@@ -1341,7 +1341,7 @@ async def run_headless_job(
     error_messages: list[str] = []
     created_issue_url: str | None = None
     token_url_scan_buffer = ""
-    transcript: list[str] = []
+    answer_chunks: list[str] = []
     spinner_index = 0
     spinner_active = False
     spinner_label = "Creating issue"
@@ -1461,7 +1461,6 @@ async def run_headless_job(
                 message = _extract_message(event)
                 if not message:
                     continue
-                transcript.append(message)
                 _record_issue_url_from_issue_writer_notification(message)
                 _record_issue_url(message)
                 level = str(data.get("level", event.get("level", "INFO"))).strip().upper()
@@ -1483,7 +1482,7 @@ async def run_headless_job(
             elif event_type in {"TOKEN", "LLM_TOKEN"}:
                 text = str(data.get("token", event.get("text", "")))
                 if text:
-                    transcript.append(text)
+                    answer_chunks.append(text)
                 _record_issue_url(text)
                 # LITE_AGENT always streams tokens; other modes only when verbose.
                 if (verbose or mode == "LITE_AGENT") and text:
@@ -1506,9 +1505,6 @@ async def run_headless_job(
                 if verbose:
                     _clear_spinner()
                     print(f"[COMMAND_RESULT] {data}")
-                command_text = str(data.get("output", "")) or str(data.get("resultText", ""))
-                if command_text:
-                    transcript.append(command_text)
                 _record_issue_url(str(data.get("output", "")))
                 _record_issue_url(str(data.get("resultText", "")))
                 _record_issue_url(str(data.get("command", "")))
@@ -1517,9 +1513,6 @@ async def run_headless_job(
                 if verbose:
                     _clear_spinner()
                     print(f"[TOOL_OUTPUT] {data}")
-                tool_text = str(data.get("text", "")) or str(data.get("resultText", ""))
-                if tool_text:
-                    transcript.append(tool_text)
                 _record_issue_url(str(data.get("output", "")))
                 _record_issue_url(str(data.get("text", "")))
                 _record_issue_url(str(data.get("resultText", "")))
@@ -1545,7 +1538,7 @@ async def run_headless_job(
 
         _clear_spinner()
         if mode == "ISSUE_WRITER":
-            draft_text = "".join(transcript).strip()
+            draft_text = "".join(answer_chunks).strip()
             try:
                 draft = _extract_json_object(draft_text)
                 issue_title = _json_string_field(draft, "title")
@@ -1562,9 +1555,12 @@ async def run_headless_job(
             )
             print(f"Issue created: {issue_url}")
         elif mode == "ISSUE_DIAGNOSE":
-            diagnosis = "".join(transcript).strip()
+            diagnosis = "".join(answer_chunks).strip()
             if not diagnosis:
-                print(f"Anvil ACP error during {mode} job: empty diagnosis", file=sys.stderr)
+                print(
+                    f"Anvil ACP error during {mode} job: no agent response text received",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             issue_number = int(tags["issue_number"])
             timestamp = datetime.now(UTC).isoformat()
