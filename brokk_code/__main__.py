@@ -69,6 +69,10 @@ def _extract_pr_url(text: str) -> str:
     return match.group(0) if match else ""
 
 
+def _print_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 def _resolve_neovim_plugin(*, plugin: str | None) -> str:
     if plugin:
         return plugin
@@ -677,11 +681,13 @@ async def run_commit(
     )
 
     try:
+        _print_progress("Starting Anvil for commit...")
         await manager.start()
         transcript: list[str] = []
         last_error: str | None = None
         last_state: str | None = None
         prompt = build_commit_prompt(message=message)
+        _print_progress("Submitting commit task to Anvil...")
         async for event in manager.run_prompt(
             prompt,
             model=model,
@@ -750,6 +756,7 @@ async def run_pr_create(
     )
 
     try:
+        _print_progress("Starting Anvil for PR create...")
         await manager.start()
         transcript: list[str] = []
         last_error: str | None = None
@@ -760,6 +767,7 @@ async def run_pr_create(
             base_branch=base_branch,
             head_branch=head_branch,
         )
+        _print_progress("Submitting PR create task to Anvil...")
         async for event in manager.run_prompt(
             prompt,
             model=model,
@@ -874,6 +882,7 @@ async def run_pr_review_job(
     try:
         stage = "starting Anvil"
         _update_shutdown_context()
+        _print_progress(f"Starting Anvil for PR review #{pr_number}...")
         await manager.start()
 
         stage = "submitting prompt"
@@ -890,6 +899,7 @@ async def run_pr_review_job(
 
         stage = "streaming ACP events"
         _update_shutdown_context()
+        _print_progress(f"Submitting PR review #{pr_number} task to Anvil...")
         async for event in manager.run_prompt(
             prompt,
             model=model,
@@ -1002,6 +1012,12 @@ async def run_headless_job(
     spinner_label = "Creating issue"
     spinner_frames = "|/-\\"
     spinner_enabled = sys.stdout.isatty() and not verbose
+    progress_label = {
+        "ISSUE_WRITER": "issue create",
+        "ISSUE_DIAGNOSE": "issue diagnose",
+        "ISSUE": "issue solve",
+        "LITE_AGENT": "exec",
+    }.get(mode, mode.lower())
 
     def _extract_message(event: dict[str, Any]) -> str:
         raw = event.get("data")
@@ -1079,6 +1095,7 @@ async def run_headless_job(
     try:
         stage = "starting Anvil"
         _update_shutdown_context()
+        _print_progress(f"Starting Anvil for {progress_label}...")
         await manager.start()
 
         stage = "submitting prompt"
@@ -1096,6 +1113,7 @@ async def run_headless_job(
 
         stage = "streaming ACP events"
         _update_shutdown_context()
+        _print_progress(f"Submitting {progress_label} task to Anvil...")
         async for event in manager.run_prompt(
             prompt,
             model=model,
