@@ -2388,6 +2388,67 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["verbose"] is True
 
 
+def test_main_commit_with_explicit_message_skips_anvil_selection(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {"ran": False}
+
+    async def fake_run_commit(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+        captured["ran"] = True
+
+    def fail_resolve_anvil_selection(**_kwargs: Any) -> None:
+        raise AssertionError("explicit commit messages should not require Anvil selection")
+
+    monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
+    monkeypatch.setattr(main_module, "resolve_anvil_selection", fail_resolve_anvil_selection)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "commit",
+            "Fix the bug",
+            "--workspace",
+            str(tmp_path),
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["ran"] is True
+    assert captured["kwargs"]["model"] is None
+    assert captured["kwargs"]["reasoning_effort"] is None
+
+
+def test_main_commit_resolves_workspace_to_repo_root(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {"ran": False}
+    repo_root = tmp_path / "repo"
+    nested_workspace = repo_root / "src" / "package"
+    nested_workspace.mkdir(parents=True)
+    (repo_root / ".git").mkdir()
+
+    async def fake_run_commit(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+        captured["ran"] = True
+
+    monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "commit",
+            "Fix the bug",
+            "--workspace",
+            str(nested_workspace),
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["ran"] is True
+    assert captured["kwargs"]["workspace_dir"] == repo_root
+
+
 def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
 
@@ -2521,6 +2582,44 @@ async def test_run_commit_uses_anvil_for_missing_message(monkeypatch, tmp_path) 
     assert captured["model"] == "gpt-test"
     assert captured["verbose"] is True
     assert "derive one concise git commit" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_run_commit_cleans_generated_markdown_fence(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, ...]] = []
+    heads = iter(["abc0000", "def1111"])
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        return "```text\nFix generated commit message\n```"
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+
+    await main_module.run_commit(workspace_dir=tmp_path, message=None)
+
+    assert ("commit", "-m", "Fix generated commit message") in calls
+
+
+@pytest.mark.asyncio
+async def test_run_commit_extracts_generated_git_commit_command(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, ...]] = []
+    heads = iter(["abc0000", "def1111"])
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        return 'git commit -m "Fix generated commit message"'
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+
+    await main_module.run_commit(workspace_dir=tmp_path, message=None)
+
+    assert ("commit", "-m", "Fix generated commit message") in calls
 
 
 @pytest.mark.asyncio
