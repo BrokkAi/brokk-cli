@@ -2280,9 +2280,7 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["verbose"] is True
 
 
-def test_main_commit_with_explicit_message_skips_anvil_selection(
-    monkeypatch, tmp_path
-) -> None:
+def test_main_commit_with_explicit_message_skips_anvil_selection(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
 
     async def fake_run_commit(**kwargs: Any) -> None:
@@ -2498,9 +2496,7 @@ async def test_run_commit_cleans_generated_markdown_fence(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_run_commit_extracts_generated_git_commit_command(
-    monkeypatch, tmp_path
-) -> None:
+async def test_run_commit_extracts_generated_git_commit_command(monkeypatch, tmp_path) -> None:
     calls: list[tuple[str, ...]] = []
     heads = iter(["abc0000", "def1111"])
     monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
