@@ -428,11 +428,8 @@ def _required_tag(tags: dict[str, str], key: str) -> str:
 
 
 def _anvil_subprocess_env() -> dict[str, str]:
-    """Build Anvil's environment without forwarding GitHub token variables."""
-    env = os.environ.copy()
-    for key in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"):
-        env.pop(key, None)
-    return env
+    """Build Anvil's environment for headless scripting commands."""
+    return os.environ.copy()
 
 
 def _session_update_to_event(update: Any) -> dict[str, Any] | None:

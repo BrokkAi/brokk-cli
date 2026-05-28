@@ -994,6 +994,48 @@ def test_main_issue_create_ignores_env_github_token(monkeypatch, tmp_path) -> No
     assert captured["kwargs"]["verbose"] is False
 
 
+def test_temporary_issue_checkout_requires_gh_binary(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(main_module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(SystemExit) as exc:
+        with main_module._temporary_issue_repo_checkout(
+            repo_owner="acme",
+            repo_name="tools",
+            action_label="Issue create",
+        ):
+            pass
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "requires the GitHub CLI" in err
+
+
+def test_temporary_issue_checkout_requires_gh_auth(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(main_module.shutil, "which", lambda _name: "/usr/bin/gh")
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["gh", "auth", "status"],
+            stderr="not logged in",
+        )
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as exc:
+        with main_module._temporary_issue_repo_checkout(
+            repo_owner="acme",
+            repo_name="tools",
+            action_label="Issue diagnose",
+        ):
+            pass
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "requires an authenticated GitHub CLI" in err
+    assert "not logged in" in err
+
+
 def test_main_issue_create_verbose_routes_correctly(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
     temp_workspace = tmp_path / "temp-create-verbose"
@@ -2130,6 +2172,27 @@ async def test_run_commit_success_output(monkeypatch, tmp_path, capsys) -> None:
     captured = capsys.readouterr()
     assert "abc1234" in captured.out
     assert "Fix parser bug" in captured.out
+
+
+@pytest.mark.asyncio
+async def test_run_commit_without_marker_or_git_change_exits_nonzero(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """Verifies that run_commit does not report success from protocol completion alone."""
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "LLM_TOKEN", "data": {"token": "finished"}},
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_commit(workspace_dir=tmp_path, message="Fix parser bug")
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "without reporting or creating a commit" in captured.err
 
 
 @pytest.mark.asyncio

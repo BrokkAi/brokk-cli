@@ -73,6 +73,28 @@ def _print_progress(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def _git_output(workspace_dir: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_dir), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip()
+
+
+def _git_head(workspace_dir: Path) -> str | None:
+    return _git_output(workspace_dir, "rev-parse", "HEAD")
+
+
+def _git_status_porcelain(workspace_dir: Path) -> str | None:
+    return _git_output(workspace_dir, "status", "--porcelain")
+
+
 def _resolve_neovim_plugin(*, plugin: str | None) -> str:
     if plugin:
         return plugin
@@ -322,6 +344,7 @@ def _temporary_issue_repo_checkout(
     temp_workspace_dir = temp_parent / repo_name
     repo_slug = f"{repo_owner}/{repo_name}"
     try:
+        _ensure_gh_available(action_label=action_label)
         print(
             f"{action_label}: shallow cloning {repo_slug} into {temp_workspace_dir}",
             flush=True,
@@ -364,6 +387,34 @@ def _temporary_issue_repo_checkout(
     finally:
         print(f"{action_label}: removing temporary checkout at {temp_workspace_dir}", flush=True)
         shutil.rmtree(temp_parent, ignore_errors=True)
+
+
+def _ensure_gh_available(*, action_label: str) -> None:
+    if shutil.which("gh") is None:
+        print(
+            f"Error: {action_label.lower()} requires the GitHub CLI (`gh`) "
+            "to clone the repository.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        subprocess.run(
+            ["gh", "auth", "status"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        print(
+            f"Error: {action_label.lower()} requires an authenticated GitHub CLI "
+            f"(`gh auth login`){suffix}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -681,6 +732,7 @@ async def run_commit(
     )
 
     try:
+        initial_head = _git_head(workspace_dir)
         _print_progress("Starting Anvil for commit...")
         await manager.start()
         transcript: list[str] = []
@@ -709,7 +761,17 @@ async def run_commit(
             print(f"Anvil ACP error during commit{detail}", file=sys.stderr)
             sys.exit(1)
 
+        current_head = _git_head(workspace_dir)
+        current_status = _git_status_porcelain(workspace_dir)
+
         if re.search(r"COMMIT:\s*no changes", output, re.IGNORECASE):
+            if current_status:
+                print(
+                    "Anvil reported no changes, but the working tree still has "
+                    "uncommitted changes.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             print("No uncommitted changes.")
         else:
             match = re.search(
@@ -720,11 +782,23 @@ async def run_commit(
             if match:
                 commit_id = match.group(1)
                 first_line = (match.group(2) or "").strip()
+                if current_head and not current_head.startswith(commit_id):
+                    print(
+                        "Anvil reported a commit, but git HEAD does not match the reported commit.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 short_id = commit_id[:7]
                 suffix = f": {first_line}" if first_line else ""
                 print(f"Committed {short_id}{suffix}")
+            elif initial_head and current_head and current_head != initial_head:
+                print(f"Committed {current_head[:7]}")
             else:
-                print("Commit completed.")
+                print(
+                    "Anvil completed the commit task without reporting or creating a commit.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     except HeadlessAnvilError as e:
         print(f"Anvil ACP error during commit: {e}", file=sys.stderr)
