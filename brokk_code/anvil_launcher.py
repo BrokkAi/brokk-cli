@@ -18,8 +18,8 @@ from pathlib import Path
 
 import httpx
 
-from brokk_code.mcp_launcher import resolve_mcp_workspace_dir
 from brokk_code.settings import get_global_cache_dir
+from brokk_code.workspace import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def run_anvil_acp_server(
     passthrough_args: list[str] | None = None,
 ) -> None:
     """Launch Anvil as the ACP stdio server."""
-    resolved_workspace_dir = resolve_mcp_workspace_dir(workspace_dir)
+    resolved_workspace_dir = resolve_workspace_dir(workspace_dir)
     launcher = "anvil"
 
     try:
@@ -54,10 +54,11 @@ def run_anvil_acp_server(
             command.extend(passthrough_args)
 
         os.chdir(resolved_workspace_dir)
+        env = _anvil_subprocess_env()
         if sys.platform == "win32":
-            result = subprocess.run(command, env=os.environ.copy())
+            result = subprocess.run(command, env=env)
             sys.exit(result.returncode)
-        os.execvpe(launcher, command, os.environ.copy())
+        os.execvpe(launcher, command, env)
     except AnvilInstallError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -71,6 +72,16 @@ def run_anvil_acp_server(
     except OSError as exc:
         print(f"Error: Failed to launch Anvil: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+def _anvil_subprocess_env() -> dict[str, str]:
+    """Build Anvil's environment without forwarding sensitive auth variables."""
+    sensitive_markers = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not any(marker in key.upper() for marker in sensitive_markers)
+    }
 
 
 def resolve_anvil_binary(

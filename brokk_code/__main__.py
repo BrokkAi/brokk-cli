@@ -1,23 +1,36 @@
 import argparse
 import asyncio
-import base64
 import contextlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from rich.console import Console
-
+from brokk_code.anvil_config import (
+    configure_anvil_scripting_interactive,
+    delete_anvil_scripting_config,
+    format_anvil_scripting_config,
+    resolve_anvil_selection,
+)
 from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, run_anvil_acp_server
 from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
-from brokk_code.executor import ExecutorError
 from brokk_code.git_utils import infer_github_repo_from_remote
+from brokk_code.headless_anvil import (
+    HeadlessAcpClient,
+    HeadlessAnvilError,
+    build_commit_prompt,
+    build_headless_prompt,
+    build_pr_create_prompt,
+    build_pr_review_prompt,
+)
 from brokk_code.intellij_config import configure_intellij_acp_settings
 from brokk_code.mcp_config import (
     configure_claude_code_mcp_settings,
@@ -30,20 +43,208 @@ from brokk_code.mcp_config import (
 )
 from brokk_code.nvim_config import configure_nvim_codecompanion_acp_settings
 from brokk_code.nvim_init_patch import wire_nvim_plugin_setup
-from brokk_code.settings import (
-    Settings,
-    read_brokk_properties,
-    write_brokk_properties,
-)
 from brokk_code.uv_utils import UvSetupError, ensure_uv_ready
 from brokk_code.workspace import resolve_workspace_dir
 from brokk_code.zed_config import ExistingBrokkCodeEntryError, configure_zed_acp_settings
 
-# Default model names used across CLI subcommands
-DEFAULT_PLANNER_MODEL = "gpt-5.4"
-DEFAULT_CODE_MODEL = "gemini-3-flash-preview"
-
 REPO_COMPONENT_ALLOWLIST_REGEX = r"^[A-Za-z0-9_.-]+$"
+
+
+def _extract_event_text(event: dict[str, Any]) -> str:
+    raw = event.get("data")
+    if isinstance(raw, str):
+        return raw.strip()
+    data = safe_data(event)
+    for key in ("message", "text", "detail", "error", "token", "resultText", "output"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("message", "text", "detail", "error", "token", "resultText", "output"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _extract_pr_url(text: str) -> str:
+    match = re.search(r"https://github\.com/[^\s)]+/pull/\d+", text)
+    return match.group(0) if match else ""
+
+
+def _extract_issue_url(text: str) -> str:
+    match = re.search(r"https://github\.com/[^\s)]+/issues/\d+", text)
+    return match.group(0) if match else ""
+
+
+def _print_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _die(message: str) -> None:
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(raw[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("Anvil response did not contain a valid JSON object")
+
+
+def _json_string_field(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Anvil JSON response is missing required string field: {key}")
+    return value.strip()
+
+
+def _git_output(workspace_dir: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_dir), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip()
+
+
+def _git_head(workspace_dir: Path) -> str | None:
+    return _git_output(workspace_dir, "rev-parse", "HEAD")
+
+
+def _git_status_porcelain(workspace_dir: Path) -> str | None:
+    return _git_output(workspace_dir, "status", "--porcelain")
+
+
+def _run_git(workspace_dir: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_dir), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or str(exc)
+        _die(f"git {' '.join(args)} failed: {detail}")
+    except OSError as exc:
+        _die(f"git {' '.join(args)} failed: {exc}")
+    return result.stdout.strip()
+
+
+def _run_gh(args: list[str], *, cwd: Path | None = None, action_label: str) -> str:
+    try:
+        result = subprocess.run(
+            ["gh", *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or str(exc)
+        _die(f"{action_label} failed: {detail}")
+    except OSError as exc:
+        _die(f"{action_label} failed: {exc}")
+    return result.stdout.strip()
+
+
+async def _run_anvil_text_prompt(
+    *,
+    workspace_dir: Path,
+    prompt: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    anvil_binary: Path | None,
+    anvil_version: str,
+    progress_label: str,
+    verbose: bool = False,
+) -> str:
+    manager = HeadlessAcpClient(
+        workspace_dir=workspace_dir,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        default_model=model,
+    )
+    try:
+        _print_progress(f"Starting Anvil for {progress_label}...")
+        await manager.start()
+        transcript: list[str] = []
+        last_error: str | None = None
+        last_state: str | None = None
+        token_output_open = False
+
+        def _print_verbose_event(event: dict[str, Any], text: str) -> None:
+            nonlocal token_output_open
+            event_type = str(event.get("type") or "UNKNOWN")
+            data = safe_data(event)
+            if event_type in {"TOKEN", "LLM_TOKEN"}:
+                if text:
+                    sys.stderr.write(text)
+                    sys.stderr.flush()
+                    token_output_open = True
+                return
+            if token_output_open:
+                sys.stderr.write("\n")
+                token_output_open = False
+            payload = data if data else {k: v for k, v in event.items() if k != "type"}
+            if payload:
+                rendered = json.dumps(payload, ensure_ascii=True, default=str)
+                print(f"[{event_type}] {rendered}", file=sys.stderr)
+            else:
+                print(f"[{event_type}]", file=sys.stderr)
+
+        _print_progress(f"Submitting {progress_label} prompt to Anvil...")
+        async for event in manager.run_prompt(
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
+            event_type = event.get("type")
+            data = safe_data(event)
+            if event_type in {"TOKEN", "LLM_TOKEN"}:
+                text = str(data.get("token", event.get("text", "")))
+            else:
+                text = _extract_event_text(event)
+            if verbose:
+                _print_verbose_event(event, text)
+            if event_type in {"TOKEN", "LLM_TOKEN"} and text:
+                transcript.append(text)
+            if event_type == "ERROR":
+                last_error = text or "unknown error"
+            elif event_type == "STATE_CHANGE":
+                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
+        if token_output_open:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+        if last_error or (last_state and is_failure_state(last_state)):
+            detail = f": {last_error}" if last_error else ""
+            raise HeadlessAnvilError(f"{progress_label} failed{detail}")
+        return "".join(transcript).strip()
+    finally:
+        await manager.stop()
 
 
 def _resolve_neovim_plugin(*, plugin: str | None) -> str:
@@ -52,11 +253,10 @@ def _resolve_neovim_plugin(*, plugin: str | None) -> str:
     if not sys.stdin.isatty():
         return "codecompanion"
 
-    console = Console()
-    console.print("Choose a Neovim plugin integration:")
-    console.print("1) CodeCompanion (ACP adapter)")
-    console.print("2) Avante (ACP provider)")
-    choice = console.input("Selection [1/2] (default: 1): ").strip().lower()
+    print("Choose a Neovim plugin integration:")
+    print("1) CodeCompanion (ACP adapter)")
+    print("2) Avante (ACP provider)")
+    choice = input("Selection [1/2] (default: 1): ").strip().lower()
     if choice in {"", "1", "codecompanion"}:
         return "codecompanion"
     if choice in {"2", "avante"}:
@@ -64,17 +264,8 @@ def _resolve_neovim_plugin(*, plugin: str | None) -> str:
     raise ValueError(f"Invalid plugin selection: '{choice}'")
 
 
-def _add_github_issue_args(
-    parser: argparse.ArgumentParser,
-    planner_model_default: str = DEFAULT_CODE_MODEL,
-) -> None:
+def _add_github_issue_args(parser: argparse.ArgumentParser) -> None:
     """Add common GitHub issue arguments to a parser."""
-    parser.add_argument(
-        "--github-token",
-        type=str,
-        default=Settings().get_github_token(),
-        help="GitHub API token (from brokk.properties, GITHUB_TOKEN env var, or --github-token)",
-    )
     parser.add_argument(
         "--repo-owner",
         type=str,
@@ -85,30 +276,36 @@ def _add_github_issue_args(
         type=str,
         help="GitHub repository name",
     )
-    parser.add_argument(
-        "--planner-model",
-        type=str,
-        default=planner_model_default,
-        help=f"LLM model for planning/analysis (default: {planner_model_default})",
-    )
+    _add_anvil_selection_args(parser)
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         default=False,
-        help="Show full headless executor output (events/tokens) for debugging",
+        help="Show full Anvil ACP output (events/tokens) for debugging",
+    )
+
+
+def _add_anvil_selection_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Override the configured Anvil model id for this task",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        type=str,
+        default=None,
+        help="Override the configured Anvil reasoning effort for this task",
     )
 
 
 def _validate_github_params(
-    github_token: str | None,
     repo_owner: str | None,
     repo_name: str | None,
     command_name: str,
 ) -> None:
-    if not github_token:
-        print(f"Error: --github-token is required for {command_name}", file=sys.stderr)
-        sys.exit(1)
     if not repo_owner:
         print(f"Error: --repo-owner is required for {command_name}", file=sys.stderr)
         sys.exit(1)
@@ -146,38 +343,19 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
         help="Path to the workspace directory (default: current directory)",
     )
     parser.add_argument(
-        "--vendor",
-        type=str,
-        choices=["Default", "Anthropic", "Gemini", "OpenAI", "OpenAI - Codex"],
+        "--anvil-binary",
+        type=Path,
         default=None,
+        help="Path to an Anvil binary for headless/ACP commands",
+    )
+    parser.add_argument(
+        "--anvil-version",
+        type=str,
+        default=BUNDLED_ANVIL_VERSION,
         help=(
-            "Set 'Other Models' vendor preference (affects internal roles like "
-            "summarize/scan/commit). Use 'Default' to clear overrides."
+            "Anvil version to use when downloading for headless/ACP commands "
+            f"(default: {BUNDLED_ANVIL_VERSION})"
         ),
-    )
-    parser.add_argument(
-        "--jar",
-        type=str,
-        default=None,
-        help="Path to brokk.jar for Java executor commands",
-    )
-    parser.add_argument(
-        "--executor-version",
-        type=str,
-        default=None,
-        help="Executor version to use (default: bundled version)",
-    )
-    parser.add_argument(
-        "--executor-snapshot",
-        action="store_true",
-        default=True,
-        help="[Ignored] Java executor compatibility flag",
-    )
-    parser.add_argument(
-        "--executor-stable",
-        action="store_false",
-        dest="executor_snapshot",
-        help="[Ignored] Java executor compatibility flag",
     )
 
 
@@ -193,13 +371,6 @@ def _add_acp_runtime_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=".",
         help="Path to the workspace directory (default: current directory)",
-    )
-    parser.add_argument(
-        "--vendor",
-        type=str,
-        choices=["Default", "Anthropic", "Gemini", "OpenAI", "OpenAI - Codex"],
-        default=None,
-        help="[Deprecated] Ignored by the Anvil ACP server.",
     )
     parser.add_argument(
         "--anvil-binary",
@@ -262,24 +433,20 @@ def _build_anvil_passthrough_args(args: argparse.Namespace) -> list[str]:
 
 def _run_issue_command(
     args: argparse.Namespace,
-    jar_path: Path | None,
     command_name: str,
     mode: str,
     task_input: str,
     action_label: str,
     *,
     include_issue_number: bool = False,
-    planner_reasoning_level: str = "disable",
-    code_model: str | None = None,
-    code_reasoning_level: str | None = None,
     skip_verification: bool | None = None,
     max_issue_fix_attempts: int | None = None,
     build_settings: str | None = None,
+    tool_key: str,
 ) -> None:
     """Run a GitHub issue command with shared validation, checkout, and job execution."""
-    _validate_github_params(args.github_token, args.repo_owner, args.repo_name, command_name)
+    _validate_github_params(args.repo_owner, args.repo_name, command_name)
     tags: dict[str, str] = {
-        "github_token": args.github_token,
         "repo_owner": args.repo_owner,
         "repo_name": args.repo_name,
     }
@@ -287,30 +454,40 @@ def _run_issue_command(
         tags["issue_number"] = str(args.issue_number)
     if build_settings:
         tags["build_settings"] = build_settings
+    selection = resolve_anvil_selection(
+        tool_key=tool_key,
+        model_override=args.model,
+        reasoning_override=args.reasoning_effort,
+        workspace_dir=Path(args.workspace).resolve(),
+        anvil_binary=args.anvil_binary,
+        anvil_version=args.anvil_version,
+    )
 
     with _temporary_issue_repo_checkout(
         repo_owner=args.repo_owner,
         repo_name=args.repo_name,
-        github_token=args.github_token,
         action_label=action_label,
     ) as issue_workspace_path:
+        if include_issue_number and mode in {"ISSUE_DIAGNOSE", "ISSUE"}:
+            tags["issue_context"] = _fetch_github_issue_context(
+                repo_owner=args.repo_owner,
+                repo_name=args.repo_name,
+                issue_number=args.issue_number,
+                cwd=issue_workspace_path,
+            )
         asyncio.run(
             run_headless_job(
                 workspace_dir=issue_workspace_path,
                 task_input=task_input,
-                planner_model=args.planner_model,
-                planner_reasoning_level=planner_reasoning_level,
-                code_model=code_model,
-                code_reasoning_level=code_reasoning_level,
+                model=selection.model,
+                reasoning_effort=selection.reasoning_effort,
                 skip_verification=skip_verification,
                 max_issue_fix_attempts=max_issue_fix_attempts,
                 verbose=args.verbose,
                 mode=mode,
                 tags=tags,
-                jar_path=jar_path,
-                executor_version=args.executor_version,
-                executor_snapshot=args.executor_snapshot,
-                vendor=args.vendor,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
         )
 
@@ -320,35 +497,28 @@ def _temporary_issue_repo_checkout(
     *,
     repo_owner: str,
     repo_name: str,
-    github_token: str,
     action_label: str,
 ) -> Iterator[Path]:
     temp_parent = Path(tempfile.mkdtemp(prefix="brokk-issue-repo-"))
     temp_workspace_dir = temp_parent / repo_name
-    clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
-    basic_auth = base64.b64encode(f"x-access-token:{github_token}".encode("utf-8")).decode("ascii")
+    repo_slug = f"{repo_owner}/{repo_name}"
     try:
+        _ensure_gh_available(action_label=action_label)
         print(
-            f"{action_label}: shallow cloning {repo_owner}/{repo_name} into {temp_workspace_dir}",
+            f"{action_label}: shallow cloning {repo_slug} into {temp_workspace_dir}",
             flush=True,
         )
         subprocess.run(
             [
-                "git",
-                "-c",
-                "credential.helper=",
-                "-c",
-                "credential.interactive=never",
-                "-c",
-                "core.askPass=",
-                "-c",
-                f"http.extraHeader=Authorization: Basic {basic_auth}",
+                "gh",
+                "repo",
                 "clone",
+                repo_slug,
+                str(temp_workspace_dir),
+                "--",
                 "--depth",
                 "1",
                 "--single-branch",
-                clone_url,
-                str(temp_workspace_dir),
             ],
             check=True,
             stdout=subprocess.PIPE,
@@ -378,6 +548,324 @@ def _temporary_issue_repo_checkout(
         shutil.rmtree(temp_parent, ignore_errors=True)
 
 
+def _ensure_gh_available(*, action_label: str) -> None:
+    if shutil.which("gh") is None:
+        print(
+            f"Error: {action_label.lower()} requires the GitHub CLI (`gh`) "
+            "to clone the repository.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        subprocess.run(
+            ["gh", "auth", "status"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        print(
+            f"Error: {action_label.lower()} requires an authenticated GitHub CLI "
+            f"(`gh auth login`){suffix}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _github_repo_slug(repo_owner: str, repo_name: str) -> str:
+    return f"{repo_owner}/{repo_name}"
+
+
+def _create_github_issue(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    title: str,
+    body: str,
+    cwd: Path | None = None,
+) -> str:
+    _ensure_gh_available(action_label="Issue create")
+    output = _run_gh(
+        [
+            "issue",
+            "create",
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--title",
+            title,
+            "--body",
+            body,
+        ],
+        cwd=cwd,
+        action_label="issue create",
+    )
+    issue_url = _extract_issue_url(output)
+    if not issue_url:
+        _die("issue create did not return a GitHub issue URL")
+    return issue_url
+
+
+def _post_github_issue_comment(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    body: str,
+    cwd: Path | None = None,
+) -> str:
+    _ensure_gh_available(action_label="Issue comment")
+    _run_gh(
+        [
+            "issue",
+            "comment",
+            str(issue_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--body",
+            body,
+        ],
+        cwd=cwd,
+        action_label="issue comment",
+    )
+    comment_url = _find_github_issue_comment_url(
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        issue_number=issue_number,
+        body=body,
+        cwd=cwd,
+    )
+    if not comment_url:
+        _die("issue comment did not appear on GitHub after gh returned success")
+    return comment_url
+
+
+def _find_github_issue_comment_url(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    body: str,
+    cwd: Path | None = None,
+) -> str:
+    output = _run_gh(
+        [
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--comments",
+            "--json",
+            "comments",
+        ],
+        cwd=cwd,
+        action_label="issue comment verification",
+    )
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return ""
+    comments = data.get("comments")
+    if not isinstance(comments, list):
+        return ""
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        if comment.get("body") != body:
+            continue
+        url = comment.get("url")
+        return url.strip() if isinstance(url, str) else ""
+    return ""
+
+
+def _validate_issue_diagnosis_body(diagnosis: str) -> None:
+    lower = diagnosis.lower()
+    if "<!-- brokk:diagnosis" in lower:
+        raise ValueError("diagnosis included the Brokk diagnosis wrapper")
+    if "## issue analysis" in lower:
+        raise ValueError("diagnosis included the Issue Analysis heading")
+    if "**next steps:**" in lower or "brokk issue solve" in lower:
+        raise ValueError("diagnosis included CLI next-step instructions")
+    if "anvil is ready. run `/setup`" in lower:
+        raise ValueError("diagnosis included the Anvil startup message")
+    if "llm request failed" in lower:
+        raise ValueError("diagnosis included an LLM failure message")
+
+
+def _sanitize_issue_diagnosis_body(diagnosis: str) -> str:
+    return diagnosis.replace("```", "&#96;&#96;&#96;")
+
+
+def _fetch_github_issue_context(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    cwd: Path | None = None,
+) -> str:
+    _ensure_gh_available(action_label="Issue fetch")
+    output = _run_gh(
+        [
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--comments",
+            "--json",
+            "title,body,comments,url",
+        ],
+        cwd=cwd,
+        action_label="issue fetch",
+    )
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return output
+    title = data.get("title") if isinstance(data.get("title"), str) else ""
+    body = data.get("body") if isinstance(data.get("body"), str) else ""
+    url = data.get("url") if isinstance(data.get("url"), str) else ""
+    out = [
+        f"# GitHub Issue #{issue_number}: {title}",
+        "",
+        f"URL: {url}",
+        "",
+        "## Description",
+        "",
+        body,
+    ]
+    comments = data.get("comments")
+    if isinstance(comments, list) and comments:
+        out.extend(["", "## Comments", ""])
+        for comment in comments[-50:]:
+            if not isinstance(comment, dict):
+                continue
+            author = comment.get("author")
+            login = author.get("login") if isinstance(author, dict) else "unknown"
+            created = comment.get("createdAt", "unknown time")
+            comment_body = comment.get("body", "")
+            out.append(f"@{login} ({created}):")
+            out.append(str(comment_body))
+            out.append("")
+    return "\n".join(out).strip()
+
+
+def _create_github_pr(
+    *,
+    title: str,
+    body: str,
+    base_branch: str | None,
+    head_branch: str | None,
+    cwd: Path,
+) -> str:
+    _ensure_gh_available(action_label="PR create")
+    args = ["pr", "create", "--title", title, "--body", body]
+    if base_branch:
+        args.extend(["--base", base_branch])
+    if head_branch:
+        args.extend(["--head", head_branch])
+    output = _run_gh(args, cwd=cwd, action_label="PR create")
+    pr_url = _extract_pr_url(output)
+    if not pr_url:
+        _die("PR create did not return a GitHub pull request URL")
+    return pr_url
+
+
+def _fetch_pr_review_context(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    cwd: Path,
+) -> tuple[str, str, str]:
+    _ensure_gh_available(action_label="PR review")
+    repo_slug = _github_repo_slug(repo_owner, repo_name)
+    metadata_output = _run_gh(
+        [
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            repo_slug,
+            "--json",
+            "title,body",
+        ],
+        cwd=cwd,
+        action_label="PR metadata fetch",
+    )
+    try:
+        metadata = json.loads(metadata_output)
+    except json.JSONDecodeError:
+        metadata = {}
+    title = metadata.get("title") if isinstance(metadata.get("title"), str) else ""
+    body = metadata.get("body") if isinstance(metadata.get("body"), str) else ""
+    diff = _run_gh(
+        ["pr", "diff", str(pr_number), "--repo", repo_slug, "--patch"],
+        cwd=cwd,
+        action_label="PR diff fetch",
+    )
+    return title, body, diff
+
+
+def _format_pr_review_body(review: dict[str, Any], *, severity_threshold: str | None) -> str:
+    summary = _json_string_field(review, "summaryMarkdown")
+    comments = review.get("comments", [])
+    if not isinstance(comments, list):
+        raise ValueError("Anvil PR review JSON field comments must be an array")
+    findings: list[str] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        path = str(comment.get("path") or "").strip()
+        line = comment.get("line")
+        severity = str(comment.get("severity") or "LOW").strip().upper()
+        body = str(comment.get("bodyMarkdown") or "").strip()
+        if not body:
+            continue
+        location = (
+            f"`{path}:{line}`" if path and isinstance(line, int) else (f"`{path}`" if path else "")
+        )
+        prefix = f"- **{severity}**"
+        if location:
+            prefix += f" at {location}"
+        findings.append(f"{prefix}: {body}")
+    if findings:
+        return summary.rstrip() + "\n\n### Findings\n\n" + "\n".join(findings)
+    threshold = severity_threshold or "HIGH"
+    return (
+        summary.rstrip() + f"\n\nNo findings met the configured severity threshold ({threshold})."
+    )
+
+
+def _post_github_pr_review(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    body: str,
+    cwd: Path,
+) -> str:
+    _ensure_gh_available(action_label="PR review")
+    return _run_gh(
+        [
+            "pr",
+            "review",
+            str(pr_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--comment",
+            "--body",
+            body,
+        ],
+        cwd=cwd,
+        action_label="PR review post",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Brokk Code - Interactive Terminal Interface")
     _add_common_runtime_args(parser)
@@ -394,6 +882,41 @@ def _build_parser() -> argparse.ArgumentParser:
             "[Deprecated] Legacy IDE hint (silently ignored). "
             "Kept for backward compatibility with stale editor configs."
         ),
+    )
+
+    anvil_config_parser = subparsers.add_parser(
+        "anvil-config",
+        help="Configure model settings for Anvil-backed scripting commands",
+    )
+    anvil_config_parser.add_argument(
+        "--workspace",
+        type=str,
+        default=".",
+        help="Path to use when querying Anvil options (default: current directory)",
+    )
+    anvil_config_parser.add_argument(
+        "--anvil-binary",
+        type=Path,
+        default=None,
+        help="Path to an Anvil binary",
+    )
+    anvil_config_parser.add_argument(
+        "--anvil-version",
+        type=str,
+        default=BUNDLED_ANVIL_VERSION,
+        help=f"Anvil version to use when downloading (default: {BUNDLED_ANVIL_VERSION})",
+    )
+    anvil_config_parser.add_argument(
+        "--show",
+        action="store_true",
+        default=False,
+        help="Print the current Anvil scripting configuration",
+    )
+    anvil_config_parser.add_argument(
+        "--reset",
+        action="store_true",
+        default=False,
+        help="Delete the Anvil scripting configuration",
     )
 
     mcp_parser = subparsers.add_parser(
@@ -443,7 +966,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Java implementations. Writes the literal commands `brokk-acp` and `bifrost` "
             "into the editor's agent_servers config; both must be on the PATH the editor "
             "inherits at agent-launch time (use --brokk-acp-binary to write an explicit "
-            "path instead). Requires --provider-model. Mutually exclusive with --native. "
+            "path instead). Requires --model. Mutually exclusive with --native. "
             "zed/intellij only."
         ),
     )
@@ -470,62 +993,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Accepted for compatibility; install no longer warms runtime dependencies",
     )
     install_parser.add_argument(
-        "--provider",
-        choices=["brokk", "custom"],
-        default=None,
-        help="Set the LLM provider during installation (brokk or custom)",
-    )
-    install_parser.add_argument(
-        "--provider-url",
-        default=None,
-        help="Custom endpoint URL (requires --provider custom)",
-    )
-    install_parser.add_argument(
-        "--provider-model",
-        default=None,
-        help="Custom endpoint model name (optional, used with --provider custom)",
-    )
-    install_parser.add_argument(
-        "--provider-api-key",
-        default=None,
-        help="Custom endpoint API key (optional, used with --provider custom)",
-    )
-
-    # ── brokk provider ─────────────────────────────────────────────────
-    provider_parser = subparsers.add_parser(
-        "provider",
-        help="Configure the LLM provider (brokk proxy or custom OpenAI-compatible endpoint)",
-    )
-    provider_subparsers = provider_parser.add_subparsers(dest="provider_command", required=True)
-
-    provider_custom_parser = provider_subparsers.add_parser(
-        "custom",
-        help="Use a custom OpenAI-compatible endpoint (Ollama, LM Studio, etc.)",
-    )
-    provider_custom_parser.add_argument(
-        "--url",
-        required=True,
-        help="Base URL of the OpenAI-compatible endpoint (e.g. http://localhost:11434/v1)",
-    )
-    provider_custom_parser.add_argument(
         "--model",
-        default="",
-        help="Model name to use (optional; auto-discovered from /v1/models if omitted)",
+        default=None,
+        help="Model name to write for --rust editor integration",
     )
-    provider_custom_parser.add_argument(
+    install_parser.add_argument(
+        "--endpoint-url",
+        default=None,
+        help="Endpoint URL to write for --rust editor integration",
+    )
+    install_parser.add_argument(
         "--api-key",
         default="",
-        help="API key for the endpoint (optional; blank for local models)",
-    )
-
-    provider_subparsers.add_parser(
-        "brokk",
-        help="Switch back to the default Brokk proxy provider",
-    )
-
-    provider_subparsers.add_parser(
-        "status",
-        help="Show current provider configuration",
+        help="API key to write for --rust editor integration",
     )
 
     commit_parser = subparsers.add_parser("commit", help="Commit current changes")
@@ -537,6 +1017,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Commit message (optional; if omitted, a message will be generated)",
     )
+    _add_anvil_selection_args(commit_parser)
+    commit_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Show full Anvil ACP output (events/tokens) for debugging",
+    )
 
     exec_parser = subparsers.add_parser(
         "exec", help="Run a prompt with LITE_AGENT (scan + architect, no build)"
@@ -547,30 +1035,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         help="The task to execute",
     )
-    exec_parser.add_argument(
-        "--planner-model",
-        type=str,
-        default=DEFAULT_PLANNER_MODEL,
-        help=f"LLM model for planning (default: {DEFAULT_PLANNER_MODEL})",
-    )
-    exec_parser.add_argument(
-        "--code-model",
-        type=str,
-        default=DEFAULT_CODE_MODEL,
-        help=f"LLM model for code generation (default: {DEFAULT_CODE_MODEL})",
-    )
-    exec_parser.add_argument(
-        "--planner-reasoning-level",
-        type=str,
-        default="high",
-        help="Reasoning level for planner model (default: high)",
-    )
-    exec_parser.add_argument(
-        "--code-reasoning-level",
-        type=str,
-        default=None,
-        help="Reasoning level for code model (default: none)",
-    )
+    _add_anvil_selection_args(exec_parser)
     exec_parser.add_argument(
         "-v",
         "--verbose",
@@ -613,26 +1078,7 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="The GitHub issue number to solve",
     )
-    _add_github_issue_args(issue_solve_parser, planner_model_default=DEFAULT_PLANNER_MODEL)
-    # Additional solve-specific arguments
-    issue_solve_parser.add_argument(
-        "--code-model",
-        type=str,
-        default=DEFAULT_CODE_MODEL,
-        help=f"LLM model for code generation (default: {DEFAULT_CODE_MODEL})",
-    )
-    issue_solve_parser.add_argument(
-        "--planner-reasoning-level",
-        type=str,
-        default="high",
-        help="Reasoning level for planner model (default: high)",
-    )
-    issue_solve_parser.add_argument(
-        "--code-reasoning-level",
-        type=str,
-        default="disable",
-        help="Reasoning level for code model (default: disable)",
-    )
+    _add_github_issue_args(issue_solve_parser)
     issue_solve_parser.add_argument(
         "--skip-verification",
         action="store_true",
@@ -649,7 +1095,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--build-settings",
         type=str,
         default=None,
-        help="JSON string of build settings overrides (matching executor expectations)",
+        help="JSON string of build settings overrides",
     )
 
     # PR commands
@@ -682,13 +1128,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Source/head branch (defaults to current branch)",
     )
+    _add_anvil_selection_args(pr_create_parser)
     pr_create_parser.add_argument(
-        "--github-token",
-        type=str,
-        default=Settings().get_github_token(),
-        help="GitHub API token (from brokk.properties, GITHUB_TOKEN env var, or --github-token)",
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Show full Anvil ACP output (events/tokens) for debugging",
     )
-
     pr_review_parser = pr_subparsers.add_parser("review", help="Review a pull request")
     _add_common_runtime_args(pr_review_parser)
     pr_review_parser.add_argument(
@@ -696,12 +1143,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         required=True,
         help="The pull request number to review",
-    )
-    pr_review_parser.add_argument(
-        "--github-token",
-        type=str,
-        default=Settings().get_github_token(),
-        help="GitHub API token (from brokk.properties, GITHUB_TOKEN env var, or --github-token)",
     )
     pr_review_parser.add_argument(
         "--repo-owner",
@@ -715,12 +1156,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="GitHub repository name (inferred from git remote if omitted)",
     )
-    pr_review_parser.add_argument(
-        "--planner-model",
-        type=str,
-        default=DEFAULT_PLANNER_MODEL,
-        help=f"LLM model for the review (default: {DEFAULT_PLANNER_MODEL})",
-    )
+    _add_anvil_selection_args(pr_review_parser)
     pr_review_parser.add_argument(
         "--severity",
         type=str,
@@ -733,7 +1169,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         default=False,
-        help="Show full headless executor output (events/tokens) for debugging",
+        help="Show full Anvil ACP output (events/tokens) for debugging",
     )
 
     version_parser = subparsers.add_parser("version", help="Print version information")
@@ -745,47 +1181,92 @@ def _build_parser() -> argparse.ArgumentParser:
 async def run_commit(
     workspace_dir: Path,
     message: str | None = None,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    verbose: bool = False,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Commits current changes via ExecutorManager."""
-    from brokk_code.executor import ExecutorError, ExecutorManager
-
-    manager = ExecutorManager(
-        workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
-    )
-
+    """Commits current changes with a message generated by Anvil ACP."""
     try:
-        await manager.start()
-        if not await manager.wait_live():
-            print("Error: executor failed to become live.", file=sys.stderr)
-            sys.exit(1)
-
-        result = await manager.commit_context(message)
-
-        if result.get("status") == "no_changes":
+        initial_head = _git_head(workspace_dir)
+        status = _git_status_porcelain(workspace_dir)
+        if status is None:
+            _die("unable to inspect git status for commit")
+        if not status:
             print("No uncommitted changes.")
-        else:
-            commit_id = result.get("commitId", "")
-            first_line = result.get("firstLine", "")
-            short_id = commit_id[:7] if commit_id else ""
-            print(f"Committed {short_id}: {first_line}")
+            return
 
-    except ExecutorError as e:
-        print(f"Executor error: {e}", file=sys.stderr)
+        commit_message = (message or "").strip()
+        if not commit_message:
+            commit_message = await _run_anvil_text_prompt(
+                workspace_dir=workspace_dir,
+                prompt=build_commit_prompt(message=None),
+                model=model,
+                reasoning_effort=reasoning_effort,
+                anvil_binary=anvil_binary,
+                anvil_version=anvil_version,
+                progress_label="commit message",
+                verbose=verbose,
+            )
+        if not commit_message:
+            _die("Anvil did not return a commit message")
+
+        _run_git(workspace_dir, "add", "-A")
+        staged = _git_output(workspace_dir, "diff", "--cached", "--name-only")
+        if not staged:
+            _die("no staged changes remain after git add")
+        _run_git(workspace_dir, "commit", "-m", commit_message)
+
+        current_head = _git_head(workspace_dir)
+        if not current_head or current_head == initial_head:
+            _die("git commit did not create a new commit")
+        print(f"Committed {current_head[:7]}: {commit_message.splitlines()[0]}")
+
+    except HeadlessAnvilError as e:
+        print(f"Anvil ACP error during commit: {e}", file=sys.stderr)
         sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"Unexpected error: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        await manager.stop()
+
+
+async def _derive_pr_create_text(
+    *,
+    workspace_dir: Path,
+    title: str | None,
+    body: str | None,
+    base_branch: str | None,
+    head_branch: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    anvil_binary: Path | None,
+    anvil_version: str,
+    verbose: bool = False,
+) -> tuple[str, str]:
+    if title and title.strip() and body and body.strip():
+        return title.strip(), body.strip()
+    text = await _run_anvil_text_prompt(
+        workspace_dir=workspace_dir,
+        prompt=build_pr_create_prompt(
+            title=title,
+            body=body,
+            base_branch=base_branch,
+            head_branch=head_branch,
+        ),
+        model=model,
+        reasoning_effort=reasoning_effort,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        progress_label="PR description",
+        verbose=verbose,
+    )
+    data = _extract_json_object(text)
+    final_title = title.strip() if title and title.strip() else _json_string_field(data, "title")
+    final_body = body.strip() if body and body.strip() else _json_string_field(data, "body")
+    return final_title, final_body
 
 
 async def run_pr_create(
@@ -794,291 +1275,131 @@ async def run_pr_create(
     body: str | None = None,
     base_branch: str | None = None,
     head_branch: str | None = None,
-    github_token: str | None = None,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    verbose: bool = False,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Creates a pull request via ExecutorManager.
-
-    If title or body is not provided, the executor will suggest them via LLM.
-    """
-    from brokk_code.executor import ExecutorError, ExecutorManager
-
-    manager = ExecutorManager(
-        workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
-    )
-
+    """Creates a pull request, using Anvil ACP only to draft missing text."""
     try:
-        await manager.start()
-        if not await manager.wait_live():
-            print("Error: executor failed to become live.", file=sys.stderr)
-            sys.exit(1)
-
-        # If title or body is missing, suggest them first
-        effective_title = title
-        effective_body = body
-        if not effective_title or not effective_body:
-            print("Suggesting PR title and description...", flush=True)
-            suggestion = await manager.pr_suggest(
-                source_branch=head_branch,
-                target_branch=base_branch,
-                github_token=github_token,
-            )
-            if not effective_title:
-                effective_title = suggestion.get("title", "")
-            if not effective_body:
-                effective_body = suggestion.get("description", "")
-
-            if not effective_title:
-                print("Error: could not determine PR title.", file=sys.stderr)
-                sys.exit(1)
-            if not effective_body:
-                effective_body = ""
-
-        # Create the PR
-        result = await manager.pr_create(
-            title=effective_title,
-            body=effective_body,
-            source_branch=head_branch,
-            target_branch=base_branch,
-            github_token=github_token,
+        pr_title, pr_body = await _derive_pr_create_text(
+            workspace_dir=workspace_dir,
+            title=title,
+            body=body,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            anvil_binary=anvil_binary,
+            anvil_version=anvil_version,
+            verbose=verbose,
         )
+        pr_url = _create_github_pr(
+            title=pr_title,
+            body=pr_body,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            cwd=workspace_dir,
+        )
+        print(f"Pull request created: {pr_url}")
 
-        pr_url = result.get("url", "")
-        if pr_url:
-            print(f"Pull request created: {pr_url}")
-        else:
-            print("Pull request created.")
-
-    except ExecutorError as e:
-        print(f"Executor error: {e}", file=sys.stderr)
+    except HeadlessAnvilError as e:
+        print(f"Anvil ACP error during PR create: {e}", file=sys.stderr)
         sys.exit(1)
+    except ValueError as e:
+        print(f"Anvil ACP error during PR create: {e}", file=sys.stderr)
+        sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"Unexpected error: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        await manager.stop()
 
 
 async def run_pr_review_job(
     workspace_dir: Path,
     pr_number: int,
-    github_token: str,
     repo_owner: str,
     repo_name: str,
-    planner_model: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     severity_threshold: str | None = None,
     verbose: bool = False,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Runs a PR review job via ExecutorManager and streams events to stdout."""
-    from brokk_code.executor import ExecutorError, ExecutorManager
-
-    manager = ExecutorManager(
-        workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
-    )
-
-    stage = "initializing"
-    job_id: str | None = None
-    last_state: str | None = None
-    error_messages: list[str] = []
-    spinner_index = 0
-    spinner_active = False
-    spinner_label = f"Reviewing PR #{pr_number}"
-    spinner_frames = "|/-\\"
-    spinner_enabled = sys.stdout.isatty() and not verbose
-
-    def _extract_message(event: dict[str, Any]) -> str:
-        raw = event.get("data")
-        if isinstance(raw, str):
-            return raw.strip()
-        data = safe_data(event)
-        for key in ("message", "text", "detail", "error"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        for key in ("message", "text", "detail", "error"):
-            value = event.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
-
-    def _render_spinner() -> None:
-        nonlocal spinner_index, spinner_active
-        if not spinner_enabled:
-            return
-        frame = spinner_frames[spinner_index % len(spinner_frames)]
-        spinner_index += 1
-        sys.stdout.write(f"\r{spinner_label}... {frame}")
-        sys.stdout.flush()
-        spinner_active = True
-
-    def _clear_spinner() -> None:
-        nonlocal spinner_active
-        if not spinner_enabled or not spinner_active:
-            return
-        width = len(spinner_label) + 20
-        sys.stdout.write("\r" + (" " * width) + "\r")
-        sys.stdout.flush()
-        spinner_active = False
-
-    def _update_shutdown_context() -> None:
-        context_parts = ["mode=REVIEW", f"stage={stage}"]
-        if job_id:
-            context_parts.append(f"job_id={job_id}")
-        if last_state:
-            context_parts.append(f"last_state={last_state}")
-        if error_messages:
-            context_parts.append(f"last_error={error_messages[-1]}")
-        manager.shutdown_context = ", ".join(context_parts)
-
+    """Generate a PR review with Anvil ACP and post it with gh."""
     try:
-        stage = "starting executor"
-        _update_shutdown_context()
-        await manager.start()
-
-        stage = "waiting for executor liveness"
-        _update_shutdown_context()
-        if not await manager.wait_live():
-            print(
-                f"Error during PR review job ({stage}): executor failed to become live.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        stage = "submitting job"
-        _update_shutdown_context()
-        _render_spinner()
-        job_id = await manager.submit_pr_review_job(
-            planner_model=planner_model,
-            github_token=github_token,
-            owner=repo_owner,
-            repo=repo_name,
+        pr_title, pr_body, pr_diff = _fetch_pr_review_context(
+            repo_owner=repo_owner,
+            repo_name=repo_name,
             pr_number=pr_number,
-            severity_threshold=severity_threshold,
+            cwd=workspace_dir,
         )
-        _update_shutdown_context()
+        review_text = await _run_anvil_text_prompt(
+            workspace_dir=workspace_dir,
+            prompt=build_pr_review_prompt(
+                owner=repo_owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                diff=pr_diff,
+                pr_title=pr_title,
+                pr_description=pr_body,
+                severity_threshold=severity_threshold,
+            ),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            anvil_binary=anvil_binary,
+            anvil_version=anvil_version,
+            progress_label=f"PR review #{pr_number}",
+            verbose=verbose,
+        )
+        review = _extract_json_object(review_text)
+        review_body = _format_pr_review_body(review, severity_threshold=severity_threshold)
+        _post_github_pr_review(
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            pr_number=pr_number,
+            body=review_body,
+            cwd=workspace_dir,
+        )
+        if verbose:
+            print(review_body)
+        print(f"PR #{pr_number} review posted.")
 
-        stage = "streaming job events"
-        _update_shutdown_context()
-        async for event in manager.stream_events(job_id):
-            _render_spinner()
-            event_type = event.get("type")
-            data = safe_data(event)
-            if event_type == "NOTIFICATION":
-                message = _extract_message(event)
-                if not message:
-                    continue
-                level = str(data.get("level", event.get("level", "INFO"))).strip().upper()
-                if not verbose and level not in {"WARN", "WARNING", "ERROR"}:
-                    continue
-                _clear_spinner()
-                print(f"[{level}] {message}")
-            elif event_type == "STATE_CHANGE":
-                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
-                _update_shutdown_context()
-                if verbose:
-                    _clear_spinner()
-                    print(f"Job state: {last_state}")
-            elif event_type in {"TOKEN", "LLM_TOKEN"}:
-                text = str(data.get("token", event.get("text", "")))
-                if verbose and text:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-                continue
-            elif event_type == "ERROR":
-                message = _extract_message(event) or "Unknown error event"
-                error_messages.append(message)
-                _update_shutdown_context()
-                _clear_spinner()
-                print(f"\nError event: {message}", file=sys.stderr)
-            elif event_type == "COMMAND_RESULT":
-                if verbose:
-                    _clear_spinner()
-                    print(f"[COMMAND_RESULT] {data}")
-            elif event_type == "TOOL_OUTPUT":
-                if verbose:
-                    _clear_spinner()
-                    print(f"[TOOL_OUTPUT] {data}")
-
-        if is_failure_state(last_state or ""):
-            _clear_spinner()
-            detail = f" Last error: {error_messages[-1]}" if error_messages else ""
-            print(
-                f"\nPR review job ended with state {last_state}.{detail}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        if error_messages and last_state != "COMPLETED":
-            _clear_spinner()
-            detail = f" Last error: {error_messages[-1]}"
-            observed_state = last_state or "UNKNOWN"
-            msg = f"\nPR review job ended with errors (last observed state: {observed_state})."
-            print(f"{msg}{detail}", file=sys.stderr)
-            sys.exit(1)
-
-        _clear_spinner()
-        print(f"PR #{pr_number} review complete.")
-
-    except ExecutorError as e:
-        _clear_spinner()
-        _update_shutdown_context()
-        print(f"Executor error during PR review job ({stage}): {e}", file=sys.stderr)
+    except HeadlessAnvilError as e:
+        print(f"Anvil ACP error during PR review job: {e}", file=sys.stderr)
         sys.exit(1)
+    except ValueError as e:
+        print(f"Anvil ACP error during PR review job: {e}", file=sys.stderr)
+        sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
-        _clear_spinner()
-        _update_shutdown_context()
-        print(f"Unexpected error during PR review job ({stage}): {e}", file=sys.stderr)
+        print(f"Unexpected error during PR review job: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        _clear_spinner()
-        _update_shutdown_context()
-        await manager.stop()
 
 
 async def run_headless_job(
     workspace_dir: Path,
     task_input: str,
-    planner_model: str,
     mode: str,
     tags: dict[str, str],
-    planner_reasoning_level: str | None = None,
-    code_reasoning_level: str | None = None,
-    code_model: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     skip_verification: bool | None = None,
     max_issue_fix_attempts: int | None = None,
     verbose: bool = False,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Runs a non-interactive job via ExecutorManager and streams events to stdout."""
-    from brokk_code.executor import ExecutorError, ExecutorManager
-
-    manager = ExecutorManager(
+    """Runs a non-interactive job via Anvil ACP and streams events to stdout."""
+    manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        default_model=model,
     )
 
     stage = "initializing"
@@ -1087,11 +1408,18 @@ async def run_headless_job(
     error_messages: list[str] = []
     created_issue_url: str | None = None
     token_url_scan_buffer = ""
+    answer_chunks: list[str] = []
     spinner_index = 0
     spinner_active = False
     spinner_label = "Creating issue"
     spinner_frames = "|/-\\"
     spinner_enabled = sys.stdout.isatty() and not verbose
+    progress_label = {
+        "ISSUE_WRITER": "issue create",
+        "ISSUE_DIAGNOSE": "issue diagnose",
+        "ISSUE": "issue solve",
+        "LITE_AGENT": "exec",
+    }.get(mode, mode.lower())
 
     def _extract_message(event: dict[str, Any]) -> str:
         raw = event.get("data")
@@ -1118,7 +1446,7 @@ async def run_headless_job(
             created_issue_url = match.group(0)
 
     def _record_issue_url_from_issue_writer_notification(message: str) -> None:
-        # Java executor success path emits:
+        # Legacy compatibility: older success events emitted:
         # "ISSUE_WRITER: issue created <id> <htmlUrl>"
         if created_issue_url or not message:
             return
@@ -1167,28 +1495,17 @@ async def run_headless_job(
         manager.shutdown_context = ", ".join(context_parts)
 
     try:
-        stage = "starting executor"
+        stage = "starting Anvil"
         _update_shutdown_context()
+        _print_progress(f"Starting Anvil for {progress_label}...")
         await manager.start()
 
-        stage = "waiting for executor liveness"
-        _update_shutdown_context()
-        if not await manager.wait_live():
-            print(
-                f"Error during {mode} job ({stage}): executor failed to become live.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        stage = "submitting job"
+        stage = "submitting prompt"
         _update_shutdown_context()
         _render_spinner()
-        job_id = await manager.submit_job(
+        job_id = f"acp-{uuid.uuid4()}"
+        prompt = build_headless_prompt(
             task_input=task_input,
-            planner_model=planner_model,
-            code_model=code_model,
-            reasoning_level=planner_reasoning_level,
-            reasoning_level_code=code_reasoning_level,
             mode=mode,
             tags=tags,
             skip_verification=skip_verification,
@@ -1196,9 +1513,14 @@ async def run_headless_job(
         )
         _update_shutdown_context()
 
-        stage = "streaming job events"
+        stage = "streaming ACP events"
         _update_shutdown_context()
-        async for event in manager.stream_events(job_id):
+        _print_progress(f"Submitting {progress_label} task to Anvil...")
+        async for event in manager.run_prompt(
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
             _render_spinner()
             event_type = event.get("type")
             data = safe_data(event)
@@ -1212,7 +1534,7 @@ async def run_headless_job(
                 # LITE_AGENT always shows notifications; others only show WARN/ERROR.
                 if (
                     not verbose
-                    and mode not in {"LITE_AGENT", "LITE_PLAN"}
+                    and mode != "LITE_AGENT"
                     and level not in {"WARN", "WARNING", "ERROR"}
                 ):
                     continue
@@ -1226,9 +1548,11 @@ async def run_headless_job(
                     print(f"Job state: {last_state}")
             elif event_type in {"TOKEN", "LLM_TOKEN"}:
                 text = str(data.get("token", event.get("text", "")))
+                if text:
+                    answer_chunks.append(text)
                 _record_issue_url(text)
                 # LITE_AGENT always streams tokens; other modes only when verbose.
-                if (verbose or mode in {"LITE_AGENT", "LITE_PLAN"}) and text:
+                if (verbose or mode == "LITE_AGENT") and text:
                     sys.stdout.write(text)
                     sys.stdout.flush()
                 continue
@@ -1281,17 +1605,70 @@ async def run_headless_job(
 
         _clear_spinner()
         if mode == "ISSUE_WRITER":
-            if created_issue_url:
-                print(f"Issue created: {created_issue_url}")
-            else:
-                print("Issue created.")
+            draft_text = "".join(answer_chunks).strip()
+            try:
+                draft = _extract_json_object(draft_text)
+                issue_title = _json_string_field(draft, "title")
+                issue_body = _json_string_field(draft, "body")
+            except ValueError as e:
+                print(f"Anvil ACP error during {mode} job: {e}", file=sys.stderr)
+                sys.exit(1)
+            issue_url = _create_github_issue(
+                repo_owner=tags["repo_owner"],
+                repo_name=tags["repo_name"],
+                title=issue_title,
+                body=issue_body,
+                cwd=workspace_dir,
+            )
+            print(f"Issue created: {issue_url}")
+        elif mode == "ISSUE_DIAGNOSE":
+            diagnosis = "".join(answer_chunks).strip()
+            if not diagnosis:
+                print(
+                    f"Anvil ACP error during {mode} job: no agent response text received",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                _validate_issue_diagnosis_body(diagnosis)
+            except ValueError as e:
+                print(f"Anvil ACP error during {mode} job: {e}", file=sys.stderr)
+                sys.exit(1)
+            diagnosis = _sanitize_issue_diagnosis_body(diagnosis)
+            issue_number = int(tags["issue_number"])
+            timestamp = datetime.now(UTC).isoformat()
+            solve_command = (
+                f"brokk issue solve --issue-number {issue_number} "
+                f"--repo-owner {tags['repo_owner']} --repo-name {tags['repo_name']}"
+            )
+            comment_body = f"""
+<!-- brokk:diagnosis:v1 timestamp="{timestamp}" -->
+
+## Issue Analysis
+
+{diagnosis}
+
+---
+
+**Next steps:** To fix this issue, run:
+
+`{solve_command}`
+""".strip()
+            comment_url = _post_github_issue_comment(
+                repo_owner=tags["repo_owner"],
+                repo_name=tags["repo_name"],
+                issue_number=issue_number,
+                body=comment_body,
+                cwd=workspace_dir,
+            )
+            print(f"Diagnosis posted: {comment_url}")
         else:
             print("Job finished.")
 
-    except ExecutorError as e:
+    except HeadlessAnvilError as e:
         _clear_spinner()
         _update_shutdown_context()
-        print(f"Executor error during {mode} job ({stage}): {e}", file=sys.stderr)
+        print(f"Anvil ACP error during {mode} job ({stage}): {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         _clear_spinner()
@@ -1305,7 +1682,7 @@ async def run_headless_job(
 
 
 # Commands that don't operate on a workspace and should skip worktree creation
-_NON_WORKSPACE_COMMANDS = {"install", "provider", "version"}
+_NON_WORKSPACE_COMMANDS = {"anvil-config", "install", "version"}
 
 
 def _resolve_worktree_workspace_path(
@@ -1330,9 +1707,7 @@ def main():
         parser.print_help()
         return
 
-    # Resolve paths early so they are available to all commands
     workspace_path = Path(args.workspace).resolve()
-    jar_path = Path(args.jar).resolve() if args.jar else None
 
     use_worktree = getattr(args, "worktree", False) and args.command not in _NON_WORKSPACE_COMMANDS
     if use_worktree:
@@ -1341,15 +1716,14 @@ def main():
         repo_root = resolve_workspace_dir(workspace_path)
         with worktree_context(repo_root) as wt_path:
             wt_workspace = _resolve_worktree_workspace_path(workspace_path, repo_root, wt_path)
-            _main_dispatch(args, wt_workspace, jar_path, unknown)
+            _main_dispatch(args, wt_workspace, unknown)
     else:
-        _main_dispatch(args, workspace_path, jar_path, unknown)
+        _main_dispatch(args, workspace_path, unknown)
 
 
 def _main_dispatch(
     args: argparse.Namespace,
     workspace_path: Path,
-    jar_path: Path | None,
     unknown: list[str],
 ) -> None:
     """Core command dispatch, extracted to support optional worktree wrapping."""
@@ -1359,12 +1733,6 @@ def _main_dispatch(
         # Fast-fail validation before prompting for API keys
         if args.plugin and args.target not in {"nvim", "neovim"}:
             print("Error: --plugin is only valid for install targets nvim/neovim", file=sys.stderr)
-            sys.exit(1)
-        if args.provider == "custom" and not args.provider_url:
-            print("Error: --provider-url is required when --provider is custom", file=sys.stderr)
-            sys.exit(1)
-        if args.provider_url and args.provider != "custom":
-            print("Error: --provider-url requires --provider custom", file=sys.stderr)
             sys.exit(1)
         if args.rust and args.native:
             print(
@@ -1383,9 +1751,9 @@ def _main_dispatch(
                 file=sys.stderr,
             )
             sys.exit(1)
-        if args.rust and not args.provider_model:
+        if args.rust and not args.model:
             print(
-                "Error: --rust requires --provider-model (passed to brokk-acp as --default-model).",
+                "Error: --rust requires --model (passed to brokk-acp as --default-model).",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -1396,26 +1764,8 @@ def _main_dispatch(
             )
             sys.exit(1)
 
-        # Apply provider settings if specified. Skipped for --rust because the
-        # Rust ACP binary doesn't read brokk.properties; its provider settings
-        # are baked into the editor's agent_servers args instead.
-        if not args.rust:
-            if args.provider == "custom":
-                write_brokk_properties(
-                    {
-                        "llmProxySetting": "CUSTOM",
-                        "customEndpointUrl": args.provider_url,
-                        "customEndpointApiKey": args.provider_api_key or "",
-                        "customEndpointModel": args.provider_model or "",
-                    }
-                )
-                print(f"Provider set to custom endpoint: {args.provider_url}")
-            elif args.provider == "brokk":
-                write_brokk_properties({"llmProxySetting": "BROKK"})
-
-        # Rust ACP path: self-contained. Skips the Brokk API key, GitHub token,
-        # runtime warmup -- the Rust binary connects directly to the user's
-        # chosen LLM endpoint and never talks to Brokk's service.
+        # Rust ACP path: self-contained. The Rust binary connects directly to
+        # the user's chosen LLM endpoint and never talks to Brokk's service.
         # brokk-code does NOT build or fetch brokk-acp/bifrost; the user is
         # responsible for installing them. We just resolve their paths.
         if args.rust:
@@ -1435,9 +1785,9 @@ def _main_dispatch(
             rust_paths = RustAcpPaths(
                 brokk_acp=brokk_acp_path,
                 bifrost=bifrost_path,
-                model=args.provider_model,
-                endpoint_url=args.provider_url,
-                api_key=args.provider_api_key,
+                model=args.model,
+                endpoint_url=args.endpoint_url,
+                api_key=args.api_key,
             )
             try:
                 if args.target == "zed":
@@ -1629,51 +1979,10 @@ def _main_dispatch(
         except (ExistingBrokkCodeEntryError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        except (ExecutorError, UvSetupError) as exc:
+        except UvSetupError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-        return
-
-    if args.command == "provider":
-        if args.provider_command == "custom":
-            url = args.url.strip()
-            if not url:
-                print("Error: --url is required", file=sys.stderr)
-                sys.exit(1)
-            write_brokk_properties(
-                {
-                    "llmProxySetting": "CUSTOM",
-                    "customEndpointUrl": url,
-                    "customEndpointApiKey": args.api_key or "",
-                    "customEndpointModel": args.model or "",
-                }
-            )
-            print(f"Provider set to custom endpoint: {url}")
-            if args.model:
-                print(f"Model: {args.model}")
-            else:
-                print("Model: (auto-discover from /v1/models)")
-            if args.api_key:
-                print("API key: (set)")
-            else:
-                print("API key: (none)")
-        elif args.provider_command == "brokk":
-            write_brokk_properties(
-                {
-                    "llmProxySetting": "BROKK",
-                }
-            )
-            print("Provider reset to Brokk proxy (default).")
-        elif args.provider_command == "status":
-            props = read_brokk_properties()
-            provider = props.get("llmProxySetting", "BROKK")
-            print(f"Provider: {provider}")
-            if provider == "CUSTOM":
-                print(f"  URL:    {props.get('customEndpointUrl', '(not set)')}")
-                model = props.get("customEndpointModel") or "(auto-discover)"
-                print(f"  Model:  {model}")
-                print(f"  API key: {'(set)' if props.get('customEndpointApiKey') else '(none)'}")
         return
 
     if args.command == "version":
@@ -1682,14 +1991,25 @@ def _main_dispatch(
         print(f"brokk {__version__}")
         return
 
-    if args.command == "acp":
-        if jar_path is not None or args.executor_version is not None:
-            print(
-                "Error: `brokk acp` launches Anvil and does not support Java "
-                "--jar or --executor-version options.",
-                file=sys.stderr,
+    if args.command == "anvil-config":
+        if args.reset:
+            deleted = delete_anvil_scripting_config()
+            message = (
+                "Deleted Anvil scripting configuration." if deleted else "No configuration found."
             )
-            sys.exit(1)
+            print(message)
+            return
+        if args.show:
+            print(format_anvil_scripting_config())
+            return
+        configure_anvil_scripting_interactive(
+            workspace_dir=workspace_path,
+            anvil_binary=args.anvil_binary,
+            anvil_version=args.anvil_version,
+        )
+        return
+
+    if args.command == "acp":
         run_anvil_acp_server(
             workspace_dir=workspace_path,
             binary_override=args.anvil_binary,
@@ -1699,14 +2019,6 @@ def _main_dispatch(
         return
 
     if args.command == "mcp":
-        if jar_path is not None or args.executor_version is not None:
-            print(
-                "Error: `brokk mcp` launches bifrost and does not support Java "
-                "--jar or --executor-version options.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
         from brokk_code.bifrost_launcher import run_bifrost_server
 
         bifrost_override = (
@@ -1721,40 +2033,61 @@ def _main_dispatch(
 
     if args.command == "exec":
         workspace_path = resolve_workspace_dir(workspace_path)
+        selection = resolve_anvil_selection(
+            tool_key="exec",
+            model_override=args.model,
+            reasoning_override=args.reasoning_effort,
+            workspace_dir=workspace_path,
+            anvil_binary=args.anvil_binary,
+            anvil_version=args.anvil_version,
+        )
         asyncio.run(
             run_headless_job(
                 workspace_dir=workspace_path,
                 task_input=args.prompt,
-                planner_model=args.planner_model,
-                code_model=args.code_model,
-                planner_reasoning_level=args.planner_reasoning_level,
-                code_reasoning_level=args.code_reasoning_level,
+                model=selection.model,
+                reasoning_effort=selection.reasoning_effort,
                 mode="LITE_AGENT",
                 tags={"mode": "LITE_AGENT"},
                 verbose=args.verbose,
-                jar_path=jar_path,
-                executor_version=args.executor_version,
-                executor_snapshot=args.executor_snapshot,
-                vendor=args.vendor,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
         )
         return
 
     if args.command == "commit":
+        selection = resolve_anvil_selection(
+            tool_key="commit",
+            model_override=args.model,
+            reasoning_override=args.reasoning_effort,
+            workspace_dir=workspace_path,
+            anvil_binary=args.anvil_binary,
+            anvil_version=args.anvil_version,
+        )
         asyncio.run(
             run_commit(
                 workspace_dir=workspace_path,
                 message=args.message,
-                jar_path=jar_path,
-                executor_version=args.executor_version,
-                executor_snapshot=args.executor_snapshot,
-                vendor=args.vendor,
+                model=selection.model,
+                reasoning_effort=selection.reasoning_effort,
+                verbose=args.verbose,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
         )
         return
 
     if args.command == "pr":
         if args.pr_command == "create":
+            selection = resolve_anvil_selection(
+                tool_key="pr_create",
+                model_override=args.model,
+                reasoning_override=args.reasoning_effort,
+                workspace_dir=workspace_path,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
+            )
             asyncio.run(
                 run_pr_create(
                     workspace_dir=workspace_path,
@@ -1762,11 +2095,11 @@ def _main_dispatch(
                     body=args.body,
                     base_branch=args.base,
                     head_branch=args.head,
-                    github_token=args.github_token,
-                    jar_path=jar_path,
-                    executor_version=args.executor_version,
-                    executor_snapshot=args.executor_snapshot,
-                    vendor=args.vendor,
+                    model=selection.model,
+                    reasoning_effort=selection.reasoning_effort,
+                    verbose=args.verbose,
+                    anvil_binary=args.anvil_binary,
+                    anvil_version=args.anvil_version,
                 )
             )
         if args.pr_command == "review":
@@ -1779,22 +2112,28 @@ def _main_dispatch(
                 if not repo_name:
                     repo_name = inferred_repo
 
-            _validate_github_params(args.github_token, repo_owner, repo_name, "pr review")
+            _validate_github_params(repo_owner, repo_name, "pr review")
+            selection = resolve_anvil_selection(
+                tool_key="pr_review",
+                model_override=args.model,
+                reasoning_override=args.reasoning_effort,
+                workspace_dir=workspace_path,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
+            )
 
             asyncio.run(
                 run_pr_review_job(
                     workspace_dir=workspace_path,
                     pr_number=args.pr_number,
-                    github_token=args.github_token,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
-                    planner_model=args.planner_model,
+                    model=selection.model,
+                    reasoning_effort=selection.reasoning_effort,
                     severity_threshold=args.severity,
                     verbose=args.verbose,
-                    jar_path=jar_path,
-                    executor_version=args.executor_version,
-                    executor_snapshot=args.executor_snapshot,
-                    vendor=args.vendor,
+                    anvil_binary=args.anvil_binary,
+                    anvil_version=args.anvil_version,
                 )
             )
         return
@@ -1803,41 +2142,38 @@ def _main_dispatch(
         if args.issue_command == "create":
             _run_issue_command(
                 args,
-                jar_path,
                 command_name="issue create",
                 mode="ISSUE_WRITER",
                 task_input=args.prompt,
                 action_label="Issue create",
+                tool_key="issue_create",
             )
             return
 
         if args.issue_command == "diagnose":
             _run_issue_command(
                 args,
-                jar_path,
                 command_name="issue diagnose",
                 mode="ISSUE_DIAGNOSE",
                 task_input=f"Diagnose GitHub Issue #{args.issue_number}",
                 action_label="Issue diagnose",
                 include_issue_number=True,
+                tool_key="issue_diagnose",
             )
             return
 
         if args.issue_command == "solve":
             _run_issue_command(
                 args,
-                jar_path,
                 command_name="issue solve",
                 mode="ISSUE",
                 task_input=f"Resolve GitHub Issue #{args.issue_number}",
                 action_label="Issue solve",
                 include_issue_number=True,
-                planner_reasoning_level=args.planner_reasoning_level,
-                code_model=args.code_model,
-                code_reasoning_level=args.code_reasoning_level,
                 skip_verification=args.skip_verification,
                 max_issue_fix_attempts=args.max_issue_fix_attempts,
                 build_settings=args.build_settings,
+                tool_key="issue_solve",
             )
             return
 

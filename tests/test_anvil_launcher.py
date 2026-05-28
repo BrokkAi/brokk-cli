@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brokk_code import anvil_launcher, mcp_launcher
+from brokk_code import anvil_launcher
 
 
 def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_path) -> None:
@@ -27,8 +27,7 @@ def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_pa
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "chdir", fake_chdir)
     monkeypatch.setattr(os, "execvpe", fake_execvpe)
-    monkeypatch.setattr(mcp_launcher, "git_toplevel_for", lambda _path: None)
-
+    monkeypatch.setenv("BROKK_TEST_SECRET", "secret")
     with pytest.raises(RuntimeError, match="stop"):
         anvil_launcher.run_anvil_acp_server(
             workspace_dir=tmp_path,
@@ -39,6 +38,7 @@ def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_pa
     assert captured["cwd"] == tmp_path.resolve()
     assert captured["binary"] == str(binary)
     assert captured["command"] == [str(binary), "--default-model", "claude-haiku-4-5"]
+    assert "BROKK_TEST_SECRET" not in captured["env"]
 
 
 def test_resolve_anvil_binary_prefers_override(tmp_path) -> None:
