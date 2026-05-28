@@ -51,7 +51,7 @@ def test_build_issue_writer_prompt_includes_create_contract() -> None:
     assert "Investigate auth failure" in prompt
 
 
-def test_build_issue_diagnose_prompt_uses_stolen_issue_format() -> None:
+def test_build_issue_diagnose_prompt_requests_inner_body_only() -> None:
     prompt = build_headless_prompt(
         task_input="ignored",
         mode="ISSUE_DIAGNOSE",
@@ -64,7 +64,10 @@ def test_build_issue_diagnose_prompt_uses_stolen_issue_format() -> None:
 
     assert "Diagnose GitHub Issue #123" in prompt
     assert "Use this issue context" in prompt
-    assert "<!-- brokk:diagnosis:v1" in prompt
+    assert "Output only the inner Markdown diagnosis content" in prompt
+    assert "The CLI will add the Brokk" in prompt
+    assert "Do not include:" in prompt
+    assert "<!-- brokk:diagnosis:v1" not in prompt
 
 
 def test_build_pr_review_prompt_includes_threshold() -> None:

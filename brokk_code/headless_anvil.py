@@ -378,11 +378,16 @@ Use this issue context plus the repository files available in this workspace:
 
 {issue_context}
 
-Output only Markdown for the diagnosis body that will be inserted under:
+Output only the inner Markdown diagnosis content. The CLI will add the Brokk
+diagnosis marker, the "## Issue Analysis" heading, and next-step instructions.
 
-<!-- brokk:diagnosis:v1 timestamp="<current ISO timestamp>" -->
+Do not include:
 
-## Issue Analysis
+- HTML comments
+- A "## Issue Analysis" heading
+- "---" separators
+- "Next steps" text
+- brokk issue solve commands
 
 Do not post the comment and do not run GitHub commands; the CLI will post it.
 """.strip()
