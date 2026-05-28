@@ -388,6 +388,7 @@ Do not include:
 - "---" separators
 - "Next steps" text
 - brokk issue solve commands
+- fenced code blocks with triple backticks; use indented code blocks or inline code instead
 
 Do not post the comment and do not run GitHub commands; the CLI will post it.
 """.strip()

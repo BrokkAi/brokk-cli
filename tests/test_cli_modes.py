@@ -1573,6 +1573,44 @@ async def test_run_headless_job_issue_diagnose_rejects_llm_error_text(
     assert "Diagnosis posted" not in captured.out
 
 
+@pytest.mark.asyncio
+async def test_run_headless_job_issue_diagnose_sanitizes_fenced_code_blocks(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    captured_comment: dict[str, Any] = {}
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "LLM_TOKEN",
+                "data": {"token": "Use this command:\n\n```bash\nbrokk mj\n```"},
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_post_github_issue_comment",
+        lambda **kwargs: (
+            captured_comment.update(kwargs)
+            or "https://github.com/brokkai/brokk/issues/9#issuecomment-1"
+        ),
+    )
+
+    await main_module.run_headless_job(
+        workspace_dir=tmp_path,
+        task_input="Diagnose issue",
+        model="test-model",
+        mode="ISSUE_DIAGNOSE",
+        tags={**ISSUE_TAGS, "issue_number": "9"},
+    )
+
+    captured = capsys.readouterr()
+    assert "Diagnosis posted:" in captured.out
+    assert "```" not in captured_comment["body"]
+    assert "&#96;&#96;&#96;bash" in captured_comment["body"]
+
+
 def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
     temp_workspace = tmp_path / "temp-diagnose"

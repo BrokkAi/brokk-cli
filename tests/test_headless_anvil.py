@@ -67,6 +67,7 @@ def test_build_issue_diagnose_prompt_requests_inner_body_only() -> None:
     assert "Output only the inner Markdown diagnosis content" in prompt
     assert "The CLI will add the Brokk" in prompt
     assert "Do not include:" in prompt
+    assert "fenced code blocks with triple backticks" in prompt
     assert "<!-- brokk:diagnosis:v1" not in prompt
 
 

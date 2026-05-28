@@ -696,6 +696,10 @@ def _validate_issue_diagnosis_body(diagnosis: str) -> None:
         raise ValueError("diagnosis included an LLM failure message")
 
 
+def _sanitize_issue_diagnosis_body(diagnosis: str) -> str:
+    return diagnosis.replace("```", "&#96;&#96;&#96;")
+
+
 def _fetch_github_issue_context(
     *,
     repo_owner: str,
@@ -1630,6 +1634,7 @@ async def run_headless_job(
             except ValueError as e:
                 print(f"Anvil ACP error during {mode} job: {e}", file=sys.stderr)
                 sys.exit(1)
+            diagnosis = _sanitize_issue_diagnosis_body(diagnosis)
             issue_number = int(tags["issue_number"])
             timestamp = datetime.now(UTC).isoformat()
             solve_command = (
