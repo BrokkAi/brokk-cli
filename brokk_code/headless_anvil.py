@@ -39,13 +39,11 @@ class HeadlessAcpClient:
         anvil_binary: Path | None = None,
         anvil_version: str = BUNDLED_ANVIL_VERSION,
         default_model: str | None = None,
-        env: dict[str, str] | None = None,
     ) -> None:
         self.workspace_dir = resolve_workspace_dir(workspace_dir)
         self.anvil_binary = anvil_binary
         self.anvil_version = anvil_version
         self.default_model = default_model
-        self.env = dict(env or {})
         self.session_id: str | None = None
 
         self._stack: AsyncExitStack | None = None
@@ -70,7 +68,7 @@ class HeadlessAcpClient:
                     str(binary),
                     *args,
                     cwd=self.workspace_dir,
-                    env=self.env,
+                    env=_anvil_subprocess_env(),
                     stderr=asyncio.subprocess.DEVNULL,
                     limit=50 * 1024 * 1024,
                 )
@@ -222,7 +220,7 @@ def build_pr_review_prompt(
     return f"""
 Review GitHub pull request #{pr_number} in {owner}/{repo}.
 
-Use the GitHub token available in the environment as GITHUB_TOKEN. Fetch the PR title,
+Use the repository's GitHub tooling/authentication, such as `gh`, to fetch the PR title,
 description, changed files, and diff. Review the changes for correctness, security,
 behavioral regressions, and missing tests.
 
@@ -287,7 +285,7 @@ def build_pr_create_prompt(
     return f"""
 Create a GitHub pull request for this repository.
 
-Use the GitHub token available in the environment as GITHUB_TOKEN.
+Use the repository's GitHub tooling/authentication, such as `gh`.
 {base_guidance}
 {head_guidance}
 {title_guidance}
@@ -300,18 +298,13 @@ PR_CREATE: pull request created <pr-url>
 """.strip()
 
 
-def github_env_from_tags(tags: dict[str, str]) -> dict[str, str]:
-    token = tags.get("github_token") or os.environ.get("GITHUB_TOKEN")
-    return {"GITHUB_TOKEN": token} if token else {}
-
-
 def _issue_writer_prompt(*, task_input: str, tags: dict[str, str]) -> str:
     owner = _required_tag(tags, "repo_owner")
     repo = _required_tag(tags, "repo_name")
     return f"""
 Create a GitHub issue in {owner}/{repo}.
 
-Use the GitHub token available in the environment as GITHUB_TOKEN. Inspect the repository
+Use the repository's GitHub tooling/authentication, such as `gh`. Inspect the repository
 for evidence relevant to this request:
 
 {task_input}
@@ -331,7 +324,7 @@ def _issue_diagnose_prompt(*, tags: dict[str, str]) -> str:
     return f"""
 Diagnose GitHub Issue #{issue_number} in {owner}/{repo}.
 
-Use the GitHub token available in the environment as GITHUB_TOKEN. Fetch the issue title,
+Use the repository's GitHub tooling/authentication, such as `gh`. Fetch the issue title,
 body, the most recent comments, and any relevant repository context. Format the issue
 context with this structure before analyzing it:
 
@@ -391,7 +384,7 @@ def _issue_solve_prompt(
     return f"""
 Resolve GitHub Issue #{issue_number} in {owner}/{repo}.
 
-Use the GitHub token available in the environment as GITHUB_TOKEN. Fetch the issue title,
+Use the repository's GitHub tooling/authentication, such as `gh`. Fetch the issue title,
 body, recent comments, and any prior Brokk diagnosis comments. Create a new branch for the
 fix, inspect the repository, implement the smallest correct change, and commit the result.
 
@@ -409,6 +402,14 @@ def _required_tag(tags: dict[str, str], key: str) -> str:
     if value is None or not value.strip():
         raise HeadlessAnvilError(f"Missing required tag for headless Anvil prompt: {key}")
     return value.strip()
+
+
+def _anvil_subprocess_env() -> dict[str, str]:
+    """Build Anvil's environment without forwarding GitHub token variables."""
+    env = os.environ.copy()
+    for key in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"):
+        env.pop(key, None)
+    return env
 
 
 def _session_update_to_event(update: Any) -> dict[str, Any] | None:

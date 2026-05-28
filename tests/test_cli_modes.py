@@ -11,7 +11,6 @@ import brokk_code.__main__ as main_module
 import brokk_code.git_utils as git_utils_module
 
 ISSUE_TAGS = {
-    "github_token": "ghp_test",
     "repo_owner": "brokkai",
     "repo_name": "brokk",
 }
@@ -110,6 +109,13 @@ def test_main_login_rejects_api_key_flag(monkeypatch) -> None:
 
 def test_main_github_subcommand_is_removed(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["brokk", "github", "login"])
+    with pytest.raises(SystemExit) as exc:
+        main_module.main()
+    assert exc.value.code == 2
+
+
+def test_main_provider_subcommand_is_removed(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["brokk", "provider", "status"])
     with pytest.raises(SystemExit) as exc:
         main_module.main()
     assert exc.value.code == 2
@@ -822,8 +828,6 @@ def test_main_issue_create_routes_correctly(monkeypatch, tmp_path) -> None:
             "Broken build",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_123",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -838,13 +842,11 @@ def test_main_issue_create_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["checkout_kwargs"]["repo_owner"] == "acme"
     assert captured["checkout_kwargs"]["repo_name"] == "tools"
-    assert captured["checkout_kwargs"]["github_token"] == "ghp_123"
     assert captured["checkout_kwargs"]["action_label"] == "Issue create"
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
     assert captured["kwargs"]["task_input"] == "Broken build"
     assert captured["kwargs"]["mode"] == "ISSUE_WRITER"
     assert captured["kwargs"]["planner_model"] == "custom-model"
-    assert captured["kwargs"]["tags"]["github_token"] == "ghp_123"
     assert captured["kwargs"]["tags"]["repo_owner"] == "acme"
     assert captured["kwargs"]["tags"]["repo_name"] == "tools"
 
@@ -853,13 +855,7 @@ def test_main_issue_create_missing_prompt_exits_nonzero(monkeypatch, tmp_path) -
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "issue",
-            "create",
-            "--github-token",
-            "ghp_123",
-        ],
+        ["brokk", "issue", "create"],
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -868,20 +864,28 @@ def test_main_issue_create_missing_prompt_exits_nonzero(monkeypatch, tmp_path) -
     assert exc.value.code != 0
 
 
-def test_main_issue_create_validation_missing_token(monkeypatch, capsys) -> None:
+def test_main_issue_create_rejects_github_token_flag(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["brokk", "issue", "create", "test", "--repo-owner", "o", "--repo-name", "r"],
+        [
+            "brokk",
+            "issue",
+            "create",
+            "Broken build",
+            "--github-token",
+            "ghp_123",
+            "--repo-owner",
+            "acme",
+            "--repo-name",
+            "tools",
+        ],
     )
-    # Ensure no env var leaks in
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
     with pytest.raises(SystemExit) as exc:
         main_module.main()
 
-    assert exc.value.code == 1
-    assert "Error: --github-token is required for issue create" in capsys.readouterr().err
+    assert exc.value.code == 2
 
 
 def test_main_issue_solve_validation_invalid_owner(monkeypatch, capsys) -> None:
@@ -894,8 +898,6 @@ def test_main_issue_solve_validation_invalid_owner(monkeypatch, capsys) -> None:
             "solve",
             "--issue-number",
             "1",
-            "--github-token",
-            "t",
             "--repo-owner",
             "invalid/owner",
             "--repo-name",
@@ -912,7 +914,7 @@ def test_main_issue_solve_validation_invalid_owner(monkeypatch, capsys) -> None:
     assert "^[A-Za-z0-9_.-]+$" in err
 
 
-def test_main_issue_create_respects_env_github_token(monkeypatch, tmp_path) -> None:
+def test_main_issue_create_ignores_env_github_token(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
     temp_workspace = tmp_path / "temp-create-env"
     temp_workspace.mkdir()
@@ -946,8 +948,8 @@ def test_main_issue_create_respects_env_github_token(monkeypatch, tmp_path) -> N
 
     main_module.main()
 
-    assert captured["kwargs"]["tags"]["github_token"] == "env-token"
-    assert captured["checkout_kwargs"]["github_token"] == "env-token"
+    assert "github_token" not in captured["kwargs"]["tags"]
+    assert "github_token" not in captured["checkout_kwargs"]
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
     assert captured["kwargs"]["planner_model"] == "gemini-3-flash-preview"
     assert captured["kwargs"]["planner_reasoning_level"] == "disable"
@@ -979,8 +981,6 @@ def test_main_issue_create_verbose_routes_correctly(monkeypatch, tmp_path) -> No
             "create",
             "Broken build",
             "-v",
-            "--github-token",
-            "ghp_verbose",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -1330,8 +1330,6 @@ def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
             "456",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_diagnose",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -1344,13 +1342,11 @@ def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["temp_workspace_input"]["repo_owner"] == "acme"
     assert captured["temp_workspace_input"]["repo_name"] == "widgets"
-    assert captured["temp_workspace_input"]["github_token"] == "ghp_diagnose"
     assert captured["temp_workspace_input"]["action_label"] == "Issue diagnose"
     assert captured["kwargs"]["mode"] == "ISSUE_DIAGNOSE"
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
     assert captured["kwargs"]["task_input"] == "Diagnose GitHub Issue #456"
     assert captured["kwargs"]["tags"]["issue_number"] == "456"
-    assert captured["kwargs"]["tags"]["github_token"] == "ghp_diagnose"
     assert captured["kwargs"]["tags"]["repo_owner"] == "acme"
     assert captured["kwargs"]["tags"]["repo_name"] == "widgets"
 
@@ -1382,8 +1378,6 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
             "123",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_solve",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -1399,13 +1393,11 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["temp_workspace_input"]["repo_owner"] == "acme"
     assert captured["temp_workspace_input"]["repo_name"] == "tools"
-    assert captured["temp_workspace_input"]["github_token"] == "ghp_solve"
     assert captured["temp_workspace_input"]["action_label"] == "Issue solve"
     assert captured["kwargs"]["mode"] == "ISSUE"
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
     assert captured["kwargs"]["task_input"] == "Resolve GitHub Issue #123"
     assert captured["kwargs"]["tags"]["issue_number"] == "123"
-    assert captured["kwargs"]["tags"]["github_token"] == "ghp_solve"
     assert captured["kwargs"]["skip_verification"] is True
     assert captured["kwargs"]["max_issue_fix_attempts"] == 7
 
@@ -1441,8 +1433,6 @@ def test_main_issue_solve_temp_workspace_cleanup_on_keyboard_interrupt(
             "123",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_solve",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -1476,32 +1466,7 @@ def test_main_issue_solve_missing_number_exits_nonzero(monkeypatch) -> None:
     assert exc.value.code != 0
 
 
-def test_main_issue_solve_missing_github_token_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "issue",
-            "solve",
-            "--issue-number",
-            "123",
-            "--repo-owner",
-            "acme",
-            "--repo-name",
-            "tools",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
-
-    assert exc.value.code != 0
-
-
 def test_main_issue_solve_missing_repo_owner_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1523,7 +1488,6 @@ def test_main_issue_solve_missing_repo_owner_exits_nonzero(monkeypatch) -> None:
 
 
 def test_main_issue_solve_missing_repo_name_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1545,7 +1509,6 @@ def test_main_issue_solve_missing_repo_name_exits_nonzero(monkeypatch) -> None:
 
 
 def test_main_issue_solve_invalid_repo_owner_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1569,7 +1532,6 @@ def test_main_issue_solve_invalid_repo_owner_exits_nonzero(monkeypatch) -> None:
 
 
 def test_main_issue_solve_invalid_repo_name_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1592,31 +1554,7 @@ def test_main_issue_solve_invalid_repo_name_exits_nonzero(monkeypatch) -> None:
     assert exc.value.code != 0
 
 
-def test_main_issue_create_missing_github_token_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "issue",
-            "create",
-            "new issue",
-            "--repo-owner",
-            "acme",
-            "--repo-name",
-            "tools",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
-
-    assert exc.value.code != 0
-
-
 def test_main_issue_create_missing_repo_owner_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1637,7 +1575,6 @@ def test_main_issue_create_missing_repo_owner_exits_nonzero(monkeypatch) -> None
 
 
 def test_main_issue_create_missing_repo_name_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1658,7 +1595,6 @@ def test_main_issue_create_missing_repo_name_exits_nonzero(monkeypatch) -> None:
 
 
 def test_main_issue_create_invalid_repo_owner_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1681,7 +1617,6 @@ def test_main_issue_create_invalid_repo_owner_exits_nonzero(monkeypatch) -> None
 
 
 def test_main_issue_create_invalid_repo_name_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1703,32 +1638,7 @@ def test_main_issue_create_invalid_repo_name_exits_nonzero(monkeypatch) -> None:
     assert exc.value.code != 0
 
 
-def test_main_issue_diagnose_missing_github_token_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "issue",
-            "diagnose",
-            "--issue-number",
-            "123",
-            "--repo-owner",
-            "acme",
-            "--repo-name",
-            "tools",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
-
-    assert exc.value.code != 0
-
-
 def test_main_issue_diagnose_missing_repo_owner_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1750,7 +1660,6 @@ def test_main_issue_diagnose_missing_repo_owner_exits_nonzero(monkeypatch) -> No
 
 
 def test_main_issue_diagnose_missing_repo_name_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1772,7 +1681,6 @@ def test_main_issue_diagnose_missing_repo_name_exits_nonzero(monkeypatch) -> Non
 
 
 def test_main_issue_diagnose_invalid_repo_owner_exits_nonzero(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1820,8 +1728,6 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
             "main",
             "--head",
             "feature-branch",
-            "--github-token",
-            "ghp_test123",
         ],
     )
 
@@ -1833,7 +1739,6 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["body"] == "PR description here"
     assert captured["kwargs"]["base_branch"] == "main"
     assert captured["kwargs"]["head_branch"] == "feature-branch"
-    assert captured["kwargs"]["github_token"] == "ghp_test123"
 
 
 def test_main_pr_create_omitted_title_body_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -1845,7 +1750,6 @@ def test_main_pr_create_omitted_title_body_routes_correctly(monkeypatch, tmp_pat
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_pr_create", fake_run_pr_create)
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1903,10 +1807,9 @@ async def test_run_pr_create_with_explicit_title_body(monkeypatch, tmp_path, cap
         workspace_dir=tmp_path,
         title="Explicit Title",
         body="Explicit Body",
-        github_token="ghp_test",
     )
 
-    assert captured["init_kwargs"]["env"] == {"GITHUB_TOKEN": "ghp_test"}
+    assert "env" not in captured["init_kwargs"]
     assert "Use this exact pull request title" in captured["prompt"]
     assert "Explicit Title" in captured["prompt"]
     assert "Use this exact pull request body" in captured["prompt"]
@@ -1928,7 +1831,6 @@ async def test_run_pr_create_derives_title_when_missing(monkeypatch, tmp_path) -
         workspace_dir=tmp_path,
         title=None,
         body="Explicit Body",
-        github_token="ghp_test",
     )
 
     assert "Derive a clear pull request title" in captured["prompt"]
@@ -1940,7 +1842,7 @@ async def test_run_pr_create_derives_title_when_missing(monkeypatch, tmp_path) -
 async def test_run_pr_create_derives_title_body_and_uses_branches(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """Verifies run_pr_create passes branch guidance and token to ACP."""
+    """Verifies run_pr_create passes branch guidance to ACP."""
     captured = _patch_headless_client(
         monkeypatch,
         events=[
@@ -1963,10 +1865,9 @@ async def test_run_pr_create_derives_title_body_and_uses_branches(
         body=None,
         base_branch="main",
         head_branch="feature-xyz",
-        github_token="ghp_both_omitted_token",
     )
 
-    assert captured["init_kwargs"]["env"] == {"GITHUB_TOKEN": "ghp_both_omitted_token"}
+    assert "env" not in captured["init_kwargs"]
     assert "Use `main` as the base branch." in captured["prompt"]
     assert "Use `feature-xyz` as the head branch." in captured["prompt"]
     assert "Derive a clear pull request title" in captured["prompt"]
@@ -1994,7 +1895,6 @@ async def test_run_pr_create_executor_error_exits_nonzero(
             workspace_dir=tmp_path,
             title="Test",
             body="Test body",
-            github_token="ghp_test",
         )
 
     assert exc.value.code == 1
@@ -2177,8 +2077,6 @@ def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
             "42",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_test",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -2194,7 +2092,6 @@ def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
     assert captured["kwargs"]["pr_number"] == 42
-    assert captured["kwargs"]["github_token"] == "ghp_test"
     assert captured["kwargs"]["repo_owner"] == "acme"
     assert captured["kwargs"]["repo_name"] == "tools"
     assert captured["kwargs"]["planner_model"] == "custom-model"
@@ -2209,8 +2106,6 @@ def test_main_pr_review_missing_pr_number_exits_nonzero(monkeypatch, tmp_path) -
             "brokk",
             "pr",
             "review",
-            "--github-token",
-            "ghp_test",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -2224,36 +2119,9 @@ def test_main_pr_review_missing_pr_number_exits_nonzero(monkeypatch, tmp_path) -
     assert exc.value.code != 0
 
 
-def test_main_pr_review_missing_github_token_exits_nonzero(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "pr",
-            "review",
-            "--pr-number",
-            "42",
-            "--workspace",
-            str(tmp_path),
-            "--repo-owner",
-            "acme",
-            "--repo-name",
-            "tools",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
-
-    assert exc.value.code == 1
-
-
 def test_main_pr_review_missing_repo_owner_without_inference_exits_nonzero(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(main_module, "infer_github_repo_from_remote", lambda _: (None, None))
     monkeypatch.setattr(
         sys,
@@ -2280,7 +2148,6 @@ def test_main_pr_review_missing_repo_owner_without_inference_exits_nonzero(
 def test_main_pr_review_missing_repo_name_without_inference_exits_nonzero(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(main_module, "infer_github_repo_from_remote", lambda _: (None, None))
     monkeypatch.setattr(
         sys,
@@ -2332,8 +2199,6 @@ def test_main_pr_review_infers_repo_from_https_remote(monkeypatch, tmp_path) -> 
             "42",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_test",
         ],
     )
 
@@ -2372,8 +2237,6 @@ def test_main_pr_review_infers_repo_from_ssh_remote(monkeypatch, tmp_path) -> No
             "42",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_test",
         ],
     )
 
@@ -2412,8 +2275,6 @@ def test_main_pr_review_explicit_params_override_inference(monkeypatch, tmp_path
             "42",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_test",
             "--repo-owner",
             "explicit-owner",
             "--repo-name",
@@ -2426,38 +2287,6 @@ def test_main_pr_review_explicit_params_override_inference(monkeypatch, tmp_path
     assert captured["ran"] is True
     assert captured["kwargs"]["repo_owner"] == "explicit-owner"
     assert captured["kwargs"]["repo_name"] == "explicit-repo"
-
-
-def test_main_pr_review_respects_env_github_token(monkeypatch, tmp_path) -> None:
-    captured: dict[str, Any] = {"ran": False}
-
-    async def fake_run_pr_review_job(**kwargs: Any) -> None:
-        captured["kwargs"] = kwargs
-        captured["ran"] = True
-
-    monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
-    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "pr",
-            "review",
-            "--pr-number",
-            "42",
-            "--workspace",
-            str(tmp_path),
-            "--repo-owner",
-            "acme",
-            "--repo-name",
-            "tools",
-        ],
-    )
-
-    main_module.main()
-
-    assert captured["kwargs"]["github_token"] == "env-token"
 
 
 def test_main_pr_review_uses_default_planner_model(monkeypatch, tmp_path) -> None:
@@ -2479,8 +2308,6 @@ def test_main_pr_review_uses_default_planner_model(monkeypatch, tmp_path) -> Non
             "42",
             "--workspace",
             str(tmp_path),
-            "--github-token",
-            "ghp_test",
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -2624,7 +2451,6 @@ async def test_run_pr_review_job_submits_anvil_prompt(monkeypatch, tmp_path) -> 
     await main_module.run_pr_review_job(
         workspace_dir=tmp_path,
         pr_number=42,
-        github_token="ghp_test",
         repo_owner="test-owner",
         repo_name="test-repo",
         planner_model="gpt-4",
@@ -2632,7 +2458,7 @@ async def test_run_pr_review_job_submits_anvil_prompt(monkeypatch, tmp_path) -> 
 
     assert "start" in call_order
     assert "run_prompt" in call_order
-    assert captured["init_kwargs"]["env"] == {"GITHUB_TOKEN": "ghp_test"}
+    assert "env" not in captured["init_kwargs"]
     assert captured["model"] == "gpt-4"
     assert "test-owner/test-repo" in captured["prompt"]
     assert "pull request #42" in captured["prompt"].lower()
@@ -2654,7 +2480,6 @@ async def test_run_pr_review_job_exits_nonzero_on_failed_state(
         await main_module.run_pr_review_job(
             workspace_dir=tmp_path,
             pr_number=42,
-            github_token="ghp_test",
             repo_owner="test-owner",
             repo_name="test-repo",
             planner_model="gpt-4",

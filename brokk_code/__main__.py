@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import base64
 import contextlib
 import os
 import re
@@ -23,7 +22,6 @@ from brokk_code.headless_anvil import (
     build_headless_prompt,
     build_pr_create_prompt,
     build_pr_review_prompt,
-    github_env_from_tags,
 )
 from brokk_code.intellij_config import configure_intellij_acp_settings
 from brokk_code.mcp_config import (
@@ -37,11 +35,6 @@ from brokk_code.mcp_config import (
 )
 from brokk_code.nvim_config import configure_nvim_codecompanion_acp_settings
 from brokk_code.nvim_init_patch import wire_nvim_plugin_setup
-from brokk_code.settings import (
-    Settings,
-    read_brokk_properties,
-    write_brokk_properties,
-)
 from brokk_code.uv_utils import UvSetupError, ensure_uv_ready
 from brokk_code.workspace import resolve_workspace_dir
 from brokk_code.zed_config import ExistingBrokkCodeEntryError, configure_zed_acp_settings
@@ -97,12 +90,6 @@ def _add_github_issue_args(
 ) -> None:
     """Add common GitHub issue arguments to a parser."""
     parser.add_argument(
-        "--github-token",
-        type=str,
-        default=Settings().get_github_token(),
-        help="GitHub API token (from brokk.properties, GITHUB_TOKEN env var, or --github-token)",
-    )
-    parser.add_argument(
         "--repo-owner",
         type=str,
         help="GitHub repository owner",
@@ -128,14 +115,10 @@ def _add_github_issue_args(
 
 
 def _validate_github_params(
-    github_token: str | None,
     repo_owner: str | None,
     repo_name: str | None,
     command_name: str,
 ) -> None:
-    if not github_token:
-        print(f"Error: --github-token is required for {command_name}", file=sys.stderr)
-        sys.exit(1)
     if not repo_owner:
         print(f"Error: --repo-owner is required for {command_name}", file=sys.stderr)
         sys.exit(1)
@@ -277,9 +260,8 @@ def _run_issue_command(
     build_settings: str | None = None,
 ) -> None:
     """Run a GitHub issue command with shared validation, checkout, and job execution."""
-    _validate_github_params(args.github_token, args.repo_owner, args.repo_name, command_name)
+    _validate_github_params(args.repo_owner, args.repo_name, command_name)
     tags: dict[str, str] = {
-        "github_token": args.github_token,
         "repo_owner": args.repo_owner,
         "repo_name": args.repo_name,
     }
@@ -291,7 +273,6 @@ def _run_issue_command(
     with _temporary_issue_repo_checkout(
         repo_owner=args.repo_owner,
         repo_name=args.repo_name,
-        github_token=args.github_token,
         action_label=action_label,
     ) as issue_workspace_path:
         asyncio.run(
@@ -318,35 +299,27 @@ def _temporary_issue_repo_checkout(
     *,
     repo_owner: str,
     repo_name: str,
-    github_token: str,
     action_label: str,
 ) -> Iterator[Path]:
     temp_parent = Path(tempfile.mkdtemp(prefix="brokk-issue-repo-"))
     temp_workspace_dir = temp_parent / repo_name
-    clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
-    basic_auth = base64.b64encode(f"x-access-token:{github_token}".encode("utf-8")).decode("ascii")
+    repo_slug = f"{repo_owner}/{repo_name}"
     try:
         print(
-            f"{action_label}: shallow cloning {repo_owner}/{repo_name} into {temp_workspace_dir}",
+            f"{action_label}: shallow cloning {repo_slug} into {temp_workspace_dir}",
             flush=True,
         )
         subprocess.run(
             [
-                "git",
-                "-c",
-                "credential.helper=",
-                "-c",
-                "credential.interactive=never",
-                "-c",
-                "core.askPass=",
-                "-c",
-                f"http.extraHeader=Authorization: Basic {basic_auth}",
+                "gh",
+                "repo",
                 "clone",
+                repo_slug,
+                str(temp_workspace_dir),
+                "--",
                 "--depth",
                 "1",
                 "--single-branch",
-                clone_url,
-                str(temp_workspace_dir),
             ],
             check=True,
             stdout=subprocess.PIPE,
@@ -441,7 +414,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Java implementations. Writes the literal commands `brokk-acp` and `bifrost` "
             "into the editor's agent_servers config; both must be on the PATH the editor "
             "inherits at agent-launch time (use --brokk-acp-binary to write an explicit "
-            "path instead). Requires --provider-model. Mutually exclusive with --native. "
+            "path instead). Requires --model. Mutually exclusive with --native. "
             "zed/intellij only."
         ),
     )
@@ -468,62 +441,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Accepted for compatibility; install no longer warms runtime dependencies",
     )
     install_parser.add_argument(
-        "--provider",
-        choices=["brokk", "custom"],
-        default=None,
-        help="Set the LLM provider during installation (brokk or custom)",
-    )
-    install_parser.add_argument(
-        "--provider-url",
-        default=None,
-        help="Custom endpoint URL (requires --provider custom)",
-    )
-    install_parser.add_argument(
-        "--provider-model",
-        default=None,
-        help="Custom endpoint model name (optional, used with --provider custom)",
-    )
-    install_parser.add_argument(
-        "--provider-api-key",
-        default=None,
-        help="Custom endpoint API key (optional, used with --provider custom)",
-    )
-
-    # ── brokk provider ─────────────────────────────────────────────────
-    provider_parser = subparsers.add_parser(
-        "provider",
-        help="Configure the LLM provider (brokk proxy or custom OpenAI-compatible endpoint)",
-    )
-    provider_subparsers = provider_parser.add_subparsers(dest="provider_command", required=True)
-
-    provider_custom_parser = provider_subparsers.add_parser(
-        "custom",
-        help="Use a custom OpenAI-compatible endpoint (Ollama, LM Studio, etc.)",
-    )
-    provider_custom_parser.add_argument(
-        "--url",
-        required=True,
-        help="Base URL of the OpenAI-compatible endpoint (e.g. http://localhost:11434/v1)",
-    )
-    provider_custom_parser.add_argument(
         "--model",
-        default="",
-        help="Model name to use (optional; auto-discovered from /v1/models if omitted)",
+        default=None,
+        help="Model name to write for --rust editor integration",
     )
-    provider_custom_parser.add_argument(
+    install_parser.add_argument(
+        "--endpoint-url",
+        default=None,
+        help="Endpoint URL to write for --rust editor integration",
+    )
+    install_parser.add_argument(
         "--api-key",
         default="",
-        help="API key for the endpoint (optional; blank for local models)",
-    )
-
-    provider_subparsers.add_parser(
-        "brokk",
-        help="Switch back to the default Brokk proxy provider",
-    )
-
-    provider_subparsers.add_parser(
-        "status",
-        help="Show current provider configuration",
+        help="API key to write for --rust editor integration",
     )
 
     commit_parser = subparsers.add_parser("commit", help="Commit current changes")
@@ -680,13 +610,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Source/head branch (defaults to current branch)",
     )
-    pr_create_parser.add_argument(
-        "--github-token",
-        type=str,
-        default=Settings().get_github_token(),
-        help="GitHub API token (from brokk.properties, GITHUB_TOKEN env var, or --github-token)",
-    )
-
     pr_review_parser = pr_subparsers.add_parser("review", help="Review a pull request")
     _add_common_runtime_args(pr_review_parser)
     pr_review_parser.add_argument(
@@ -694,12 +617,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         required=True,
         help="The pull request number to review",
-    )
-    pr_review_parser.add_argument(
-        "--github-token",
-        type=str,
-        default=Settings().get_github_token(),
-        help="GitHub API token (from brokk.properties, GITHUB_TOKEN env var, or --github-token)",
     )
     pr_review_parser.add_argument(
         "--repo-owner",
@@ -809,7 +726,6 @@ async def run_pr_create(
     body: str | None = None,
     base_branch: str | None = None,
     head_branch: str | None = None,
-    github_token: str | None = None,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
@@ -818,7 +734,6 @@ async def run_pr_create(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
-        env={"GITHUB_TOKEN": github_token} if github_token else {},
     )
 
     try:
@@ -868,7 +783,6 @@ async def run_pr_create(
 async def run_pr_review_job(
     workspace_dir: Path,
     pr_number: int,
-    github_token: str,
     repo_owner: str,
     repo_name: str,
     planner_model: str,
@@ -883,7 +797,6 @@ async def run_pr_review_job(
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
         default_model=planner_model,
-        env={"GITHUB_TOKEN": github_token},
     )
 
     stage = "initializing"
@@ -1056,7 +969,6 @@ async def run_headless_job(
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
         default_model=planner_model,
-        env=github_env_from_tags(tags),
     )
 
     stage = "initializing"
@@ -1271,7 +1183,7 @@ async def run_headless_job(
 
 
 # Commands that don't operate on a workspace and should skip worktree creation
-_NON_WORKSPACE_COMMANDS = {"install", "provider", "version"}
+_NON_WORKSPACE_COMMANDS = {"install", "version"}
 
 
 def _resolve_worktree_workspace_path(
@@ -1323,12 +1235,6 @@ def _main_dispatch(
         if args.plugin and args.target not in {"nvim", "neovim"}:
             print("Error: --plugin is only valid for install targets nvim/neovim", file=sys.stderr)
             sys.exit(1)
-        if args.provider == "custom" and not args.provider_url:
-            print("Error: --provider-url is required when --provider is custom", file=sys.stderr)
-            sys.exit(1)
-        if args.provider_url and args.provider != "custom":
-            print("Error: --provider-url requires --provider custom", file=sys.stderr)
-            sys.exit(1)
         if args.rust and args.native:
             print(
                 "Error: --rust and --native are mutually exclusive; pass only one.",
@@ -1346,9 +1252,9 @@ def _main_dispatch(
                 file=sys.stderr,
             )
             sys.exit(1)
-        if args.rust and not args.provider_model:
+        if args.rust and not args.model:
             print(
-                "Error: --rust requires --provider-model (passed to brokk-acp as --default-model).",
+                "Error: --rust requires --model (passed to brokk-acp as --default-model).",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -1359,26 +1265,8 @@ def _main_dispatch(
             )
             sys.exit(1)
 
-        # Apply provider settings if specified. Skipped for --rust because the
-        # Rust ACP binary doesn't read brokk.properties; its provider settings
-        # are baked into the editor's agent_servers args instead.
-        if not args.rust:
-            if args.provider == "custom":
-                write_brokk_properties(
-                    {
-                        "llmProxySetting": "CUSTOM",
-                        "customEndpointUrl": args.provider_url,
-                        "customEndpointApiKey": args.provider_api_key or "",
-                        "customEndpointModel": args.provider_model or "",
-                    }
-                )
-                print(f"Provider set to custom endpoint: {args.provider_url}")
-            elif args.provider == "brokk":
-                write_brokk_properties({"llmProxySetting": "BROKK"})
-
-        # Rust ACP path: self-contained. Skips the Brokk API key, GitHub token,
-        # runtime warmup -- the Rust binary connects directly to the user's
-        # chosen LLM endpoint and never talks to Brokk's service.
+        # Rust ACP path: self-contained. The Rust binary connects directly to
+        # the user's chosen LLM endpoint and never talks to Brokk's service.
         # brokk-code does NOT build or fetch brokk-acp/bifrost; the user is
         # responsible for installing them. We just resolve their paths.
         if args.rust:
@@ -1398,9 +1286,9 @@ def _main_dispatch(
             rust_paths = RustAcpPaths(
                 brokk_acp=brokk_acp_path,
                 bifrost=bifrost_path,
-                model=args.provider_model,
-                endpoint_url=args.provider_url,
-                api_key=args.provider_api_key,
+                model=args.model,
+                endpoint_url=args.endpoint_url,
+                api_key=args.api_key,
             )
             try:
                 if args.target == "zed":
@@ -1598,47 +1486,6 @@ def _main_dispatch(
 
         return
 
-    if args.command == "provider":
-        if args.provider_command == "custom":
-            url = args.url.strip()
-            if not url:
-                print("Error: --url is required", file=sys.stderr)
-                sys.exit(1)
-            write_brokk_properties(
-                {
-                    "llmProxySetting": "CUSTOM",
-                    "customEndpointUrl": url,
-                    "customEndpointApiKey": args.api_key or "",
-                    "customEndpointModel": args.model or "",
-                }
-            )
-            print(f"Provider set to custom endpoint: {url}")
-            if args.model:
-                print(f"Model: {args.model}")
-            else:
-                print("Model: (auto-discover from /v1/models)")
-            if args.api_key:
-                print("API key: (set)")
-            else:
-                print("API key: (none)")
-        elif args.provider_command == "brokk":
-            write_brokk_properties(
-                {
-                    "llmProxySetting": "BROKK",
-                }
-            )
-            print("Provider reset to Brokk proxy (default).")
-        elif args.provider_command == "status":
-            props = read_brokk_properties()
-            provider = props.get("llmProxySetting", "BROKK")
-            print(f"Provider: {provider}")
-            if provider == "CUSTOM":
-                print(f"  URL:    {props.get('customEndpointUrl', '(not set)')}")
-                model = props.get("customEndpointModel") or "(auto-discover)"
-                print(f"  Model:  {model}")
-                print(f"  API key: {'(set)' if props.get('customEndpointApiKey') else '(none)'}")
-        return
-
     if args.command == "version":
         from brokk_code import __version__
 
@@ -1706,7 +1553,6 @@ def _main_dispatch(
                     body=args.body,
                     base_branch=args.base,
                     head_branch=args.head,
-                    github_token=args.github_token,
                     anvil_binary=args.anvil_binary,
                     anvil_version=args.anvil_version,
                 )
@@ -1721,13 +1567,12 @@ def _main_dispatch(
                 if not repo_name:
                     repo_name = inferred_repo
 
-            _validate_github_params(args.github_token, repo_owner, repo_name, "pr review")
+            _validate_github_params(repo_owner, repo_name, "pr review")
 
             asyncio.run(
                 run_pr_review_job(
                     workspace_dir=workspace_path,
                     pr_number=args.pr_number,
-                    github_token=args.github_token,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
                     planner_model=args.planner_model,

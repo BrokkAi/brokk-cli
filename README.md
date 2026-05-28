@@ -162,14 +162,15 @@ The Python CLI supports creating GitHub issues based on repository evidence via 
 # Example: Create an issue for a discovered bug
 brokk issue create "Describe the NPE in AuthService" \
   --repo-owner acme-corp \
-  --repo-name service-api \
-  --github-token ghp_yourToken
+  --repo-name service-api
 ```
 
 **Required Arguments:**
 - `prompt`: A description of the problem or evidence to report.
 - `--repo-owner` / `--repo-name`: Target GitHub repository.
-- `--github-token`: GitHub PAT (can also be set via `GITHUB_TOKEN` environment variable).
+
+GitHub authentication is handled by GitHub tooling such as `gh`; `brokk-cli`
+does not accept or forward GitHub token flags.
 
 ## For Contributors & LLMs
 

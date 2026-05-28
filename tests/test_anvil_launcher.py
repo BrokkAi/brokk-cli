@@ -27,6 +27,8 @@ def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_pa
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "chdir", fake_chdir)
     monkeypatch.setattr(os, "execvpe", fake_execvpe)
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    monkeypatch.setenv("GH_TOKEN", "secret")
     with pytest.raises(RuntimeError, match="stop"):
         anvil_launcher.run_anvil_acp_server(
             workspace_dir=tmp_path,
@@ -37,6 +39,8 @@ def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_pa
     assert captured["cwd"] == tmp_path.resolve()
     assert captured["binary"] == str(binary)
     assert captured["command"] == [str(binary), "--default-model", "claude-haiku-4-5"]
+    assert "GITHUB_TOKEN" not in captured["env"]
+    assert "GH_TOKEN" not in captured["env"]
 
 
 def test_resolve_anvil_binary_prefers_override(tmp_path) -> None:

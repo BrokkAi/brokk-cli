@@ -25,7 +25,6 @@ from brokk_code.headless_anvil import (
     build_headless_prompt,
     build_pr_create_prompt,
     build_pr_review_prompt,
-    github_env_from_tags,
 )
 
 
@@ -41,7 +40,6 @@ def test_build_issue_writer_prompt_includes_create_contract() -> None:
         tags={
             "repo_owner": "acme",
             "repo_name": "service",
-            "github_token": "secret",
         },
     )
 
@@ -102,12 +100,6 @@ def test_build_pr_create_prompt_includes_contract_and_branches() -> None:
     assert "Ship ACP" in prompt
     assert "Port headless commands." in prompt
     assert "PR_CREATE: pull request created <pr-url>" in prompt
-
-
-def test_github_env_from_tags_prefers_tag_token(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "from-env")
-
-    assert github_env_from_tags({"github_token": "from-tag"}) == {"GITHUB_TOKEN": "from-tag"}
 
 
 def test_session_update_to_event_maps_agent_text_to_llm_token() -> None:
@@ -253,7 +245,6 @@ async def test_headless_acp_client_round_trips_against_sdk_agent(
     client = HeadlessAcpClient(
         workspace_dir=tmp_path,
         default_model="default-model",
-        env={"GITHUB_TOKEN": "secret"},
     )
 
     await client.start()

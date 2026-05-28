@@ -54,10 +54,11 @@ def run_anvil_acp_server(
             command.extend(passthrough_args)
 
         os.chdir(resolved_workspace_dir)
+        env = _anvil_subprocess_env()
         if sys.platform == "win32":
-            result = subprocess.run(command, env=os.environ.copy())
+            result = subprocess.run(command, env=env)
             sys.exit(result.returncode)
-        os.execvpe(launcher, command, os.environ.copy())
+        os.execvpe(launcher, command, env)
     except AnvilInstallError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -71,6 +72,14 @@ def run_anvil_acp_server(
     except OSError as exc:
         print(f"Error: Failed to launch Anvil: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+def _anvil_subprocess_env() -> dict[str, str]:
+    """Build Anvil's environment without forwarding GitHub token variables."""
+    env = os.environ.copy()
+    for key in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"):
+        env.pop(key, None)
+    return env
 
 
 def resolve_anvil_binary(
