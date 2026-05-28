@@ -1668,7 +1668,7 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
     temp_workspace = tmp_path / "temp-copy"
     temp_workspace.mkdir()
 
-    async def fake_run_headless_job(**kwargs: Any) -> None:
+    async def fake_run_issue_solve(**kwargs: Any) -> None:
         captured["kwargs"] = kwargs
         captured["ran"] = True
 
@@ -1677,7 +1677,7 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
         captured["temp_workspace_input"] = kwargs
         yield temp_workspace
 
-    monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
+    monkeypatch.setattr(main_module, "run_issue_solve", fake_run_issue_solve)
     monkeypatch.setattr(main_module, "_temporary_issue_repo_checkout", fake_temp_workspace)
     monkeypatch.setattr(
         main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
@@ -1709,10 +1709,13 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["temp_workspace_input"]["repo_owner"] == "acme"
     assert captured["temp_workspace_input"]["repo_name"] == "tools"
     assert captured["temp_workspace_input"]["action_label"] == "Issue solve"
-    assert captured["kwargs"]["mode"] == "ISSUE"
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
-    assert captured["kwargs"]["task_input"] == "Resolve GitHub Issue #123"
+    assert captured["kwargs"]["issue_number"] == 123
+    assert captured["kwargs"]["repo_owner"] == "acme"
+    assert captured["kwargs"]["repo_name"] == "tools"
+    assert captured["kwargs"]["issue_context"] == "issue context"
     assert captured["kwargs"]["tags"]["issue_number"] == "123"
+    assert captured["kwargs"]["tags"]["issue_context"] == "issue context"
     assert captured["kwargs"]["skip_verification"] is True
     assert captured["kwargs"]["max_issue_fix_attempts"] == 7
 
@@ -1724,7 +1727,7 @@ def test_main_issue_solve_temp_workspace_cleanup_on_keyboard_interrupt(
     temp_workspace = tmp_path / "temp-copy"
     temp_workspace.mkdir()
 
-    async def fake_run_headless_job(**kwargs: Any) -> None:
+    async def fake_run_issue_solve(**kwargs: Any) -> None:
         raise KeyboardInterrupt
 
     @contextmanager
@@ -1735,7 +1738,7 @@ def test_main_issue_solve_temp_workspace_cleanup_on_keyboard_interrupt(
         finally:
             captured["cleaned"] = True
 
-    monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
+    monkeypatch.setattr(main_module, "run_issue_solve", fake_run_issue_solve)
     monkeypatch.setattr(main_module, "_temporary_issue_repo_checkout", fake_temp_workspace)
     monkeypatch.setattr(
         main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
@@ -1763,6 +1766,111 @@ def test_main_issue_solve_temp_workspace_cleanup_on_keyboard_interrupt(
 
     assert captured["temp_workspace_input"]["repo_owner"] == "acme"
     assert captured["cleaned"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_issue_solve_commits_pushes_and_creates_pr(monkeypatch, tmp_path, capsys) -> None:
+    captured_anvil: dict[str, Any] = {}
+    captured_pr: dict[str, Any] = {}
+    git_calls: list[tuple[str, ...]] = []
+    heads = iter(["abc123", "def456"])
+
+    async def fake_run_headless_job(**kwargs: Any) -> None:
+        captured_anvil.update(kwargs)
+
+    def fake_run_git(_workspace_dir: Any, *args: str) -> str:
+        git_calls.append(args)
+        return ""
+
+    monkeypatch.setattr(main_module, "_issue_solve_branch_name", lambda _issue: "brokk/issue-123")
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace_dir: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace_dir: " M fix.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace_dir, *args: "fix.py")
+    monkeypatch.setattr(main_module, "_run_git", fake_run_git)
+    monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
+    monkeypatch.setattr(
+        main_module,
+        "_create_github_pr",
+        lambda **kwargs: captured_pr.update(kwargs) or "https://github.com/acme/tools/pull/9",
+    )
+
+    await main_module.run_issue_solve(
+        workspace_dir=tmp_path,
+        issue_number=123,
+        repo_owner="acme",
+        repo_name="tools",
+        issue_context="# GitHub Issue #123: Broken solver",
+        tags={
+            "repo_owner": "acme",
+            "repo_name": "tools",
+            "issue_number": "123",
+            "issue_context": "# GitHub Issue #123: Broken solver",
+        },
+        skip_verification=True,
+        max_issue_fix_attempts=3,
+    )
+
+    assert captured_anvil["mode"] == "ISSUE"
+    assert captured_anvil["task_input"] == "Resolve GitHub Issue #123"
+    assert captured_anvil["skip_verification"] is True
+    assert captured_anvil["max_issue_fix_attempts"] == 3
+    assert git_calls == [
+        ("checkout", "-b", "brokk/issue-123"),
+        ("add", "-A"),
+        ("commit", "-m", "Fix issue #123"),
+        ("push", "-u", "origin", "brokk/issue-123"),
+    ]
+    assert captured_pr["title"] == "Fix Broken solver"
+    assert captured_pr["body"].startswith("Fixes #123")
+    assert captured_pr["head_branch"] == "brokk/issue-123"
+    assert captured_pr["cwd"] == tmp_path
+    assert "Issue solve pull request created: https://github.com/acme/tools/pull/9" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_issue_solve_exits_when_anvil_makes_no_changes(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    git_calls: list[tuple[str, ...]] = []
+
+    async def fake_run_headless_job(**_kwargs: Any) -> None:
+        return None
+
+    def fake_run_git(_workspace_dir: Any, *args: str) -> str:
+        git_calls.append(args)
+        return ""
+
+    monkeypatch.setattr(main_module, "_issue_solve_branch_name", lambda _issue: "brokk/issue-123")
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace_dir: "abc123")
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace_dir: "")
+    monkeypatch.setattr(main_module, "_run_git", fake_run_git)
+    monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
+    monkeypatch.setattr(
+        main_module,
+        "_create_github_pr",
+        lambda **_kwargs: pytest.fail("PR should not be created without changes"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_issue_solve(
+            workspace_dir=tmp_path,
+            issue_number=123,
+            repo_owner="acme",
+            repo_name="tools",
+            issue_context="issue context",
+            tags={
+                "repo_owner": "acme",
+                "repo_name": "tools",
+                "issue_number": "123",
+                "issue_context": "issue context",
+            },
+        )
+
+    assert exc.value.code == 1
+    assert git_calls == [("checkout", "-b", "brokk/issue-123")]
+    assert "issue solve did not produce any file changes" in capsys.readouterr().err
 
 
 def test_main_issue_solve_missing_number_exits_nonzero(monkeypatch) -> None:

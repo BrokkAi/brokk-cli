@@ -403,6 +403,7 @@ def _issue_solve_prompt(
     owner = _required_tag(tags, "repo_owner")
     repo = _required_tag(tags, "repo_name")
     issue_number = _required_tag(tags, "issue_number")
+    issue_context = tags.get("issue_context", "").strip() or "(No issue context provided)"
     build_settings = tags.get("build_settings")
     build_guidance = (
         f"Use these repository build settings when relevant:\n\n{build_settings.strip()}"
@@ -422,16 +423,18 @@ def _issue_solve_prompt(
     return f"""
 Resolve GitHub Issue #{issue_number} in {owner}/{repo}.
 
-Use the repository's GitHub tooling/authentication, such as `gh`. Fetch the issue title,
-body, recent comments, and any prior Brokk diagnosis comments. Create a new branch for the
-fix, inspect the repository, implement the smallest correct change, and commit the result.
+Use this issue context plus the repository files available in this workspace:
+
+{issue_context}
+
+Inspect the repository and implement the smallest correct change for this issue.
 
 {build_guidance}
 {verification}
 {attempts}
 
-Push the branch and open a pull request against the repository default branch. The pull
-request body must reference and close issue #{issue_number}. Finish by reporting the PR URL.
+Do not create branches, commit, push, open pull requests, or run GitHub commands. The CLI
+will perform all git and GitHub operations after you finish changing files.
 """.strip()
 
 
