@@ -48,12 +48,10 @@ def settings_file() -> Path:
 
 @dataclass
 class Settings:
-    """Persisted CLI preferences and credentials lookup helpers."""
+    """Persisted CLI preferences."""
 
     last_model: str | None = None
-    last_code_model: str | None = None
-    last_reasoning_level: str | None = None
-    last_code_reasoning_level: str | None = None
+    last_reasoning_effort: str | None = None
     last_auto_commit: bool | None = None
 
     @classmethod

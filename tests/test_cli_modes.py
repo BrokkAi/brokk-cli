@@ -37,9 +37,16 @@ def _patch_headless_client(
             if start_error is not None:
                 raise start_error
 
-        async def run_prompt(self, prompt: str, *, model: str | None = None):
+        async def run_prompt(
+            self,
+            prompt: str,
+            *,
+            model: str | None = None,
+            reasoning_effort: str | None = None,
+        ):
             captured["prompt"] = prompt
             captured["model"] = model
+            captured["reasoning_effort"] = reasoning_effort
             if call_order is not None:
                 call_order.append("run_prompt")
             if prompt_error is not None:
@@ -832,8 +839,10 @@ def test_main_issue_create_routes_correctly(monkeypatch, tmp_path) -> None:
             "acme",
             "--repo-name",
             "tools",
-            "--planner-model",
+            "--model",
             "custom-model",
+            "--reasoning-effort",
+            "high",
         ],
     )
 
@@ -846,7 +855,8 @@ def test_main_issue_create_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
     assert captured["kwargs"]["task_input"] == "Broken build"
     assert captured["kwargs"]["mode"] == "ISSUE_WRITER"
-    assert captured["kwargs"]["planner_model"] == "custom-model"
+    assert captured["kwargs"]["model"] == "custom-model"
+    assert captured["kwargs"]["reasoning_effort"] == "high"
     assert captured["kwargs"]["tags"]["repo_owner"] == "acme"
     assert captured["kwargs"]["tags"]["repo_name"] == "tools"
 
@@ -951,8 +961,8 @@ def test_main_issue_create_ignores_env_github_token(monkeypatch, tmp_path) -> No
     assert "github_token" not in captured["kwargs"]["tags"]
     assert "github_token" not in captured["checkout_kwargs"]
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
-    assert captured["kwargs"]["planner_model"] == "gemini-3-flash-preview"
-    assert captured["kwargs"]["planner_reasoning_level"] == "disable"
+    assert captured["kwargs"]["model"] is None
+    assert captured["kwargs"]["reasoning_effort"] is None
     assert captured["kwargs"]["verbose"] is False
 
 
@@ -1000,7 +1010,7 @@ def test_main_issue_create_verbose_routes_correctly(monkeypatch, tmp_path) -> No
 async def test_run_headless_job_starts_before_prompt(monkeypatch, tmp_path) -> None:
     """Verifies that run_headless_job starts Anvil before submitting the prompt."""
     call_order: list[str] = []
-    _patch_headless_client(
+    captured = _patch_headless_client(
         monkeypatch,
         events=[{"type": "STATE_CHANGE", "state": "COMPLETED"}],
         call_order=call_order,
@@ -1009,13 +1019,17 @@ async def test_run_headless_job_starts_before_prompt(monkeypatch, tmp_path) -> N
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Test task",
-        planner_model="test-model",
+        model="test-model",
+        reasoning_effort="high",
         mode="LUTZ",
         tags={},
     )
 
     assert "start" in call_order
     assert "run_prompt" in call_order
+    assert captured["init_kwargs"]["default_model"] == "test-model"
+    assert captured["model"] == "test-model"
+    assert captured["reasoning_effort"] == "high"
 
     start_idx = call_order.index("start")
     run_prompt_idx = call_order.index("run_prompt")
@@ -1042,7 +1056,7 @@ async def test_run_headless_job_reports_failed_terminal_state(
         await main_module.run_headless_job(
             workspace_dir=tmp_path,
             task_input="Create issue",
-            planner_model="test-model",
+            model="test-model",
             mode="ISSUE_WRITER",
             tags=ISSUE_TAGS,
         )
@@ -1070,7 +1084,7 @@ async def test_run_headless_job_reports_stage_on_submit_failure(
         await main_module.run_headless_job(
             workspace_dir=tmp_path,
             task_input="Create issue",
-            planner_model="test-model",
+            model="test-model",
             mode="ISSUE_WRITER",
             tags=ISSUE_TAGS,
         )
@@ -1101,7 +1115,7 @@ async def test_run_headless_job_uses_nested_event_data_for_errors_and_quiet_noti
         await main_module.run_headless_job(
             workspace_dir=tmp_path,
             task_input="Create issue",
-            planner_model="test-model",
+            model="test-model",
             mode="ISSUE_WRITER",
             tags=ISSUE_TAGS,
         )
@@ -1134,7 +1148,7 @@ async def test_run_headless_job_verbose_shows_full_event_output(
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
-        planner_model="test-model",
+        model="test-model",
         mode="ISSUE_WRITER",
         tags=ISSUE_TAGS,
         verbose=True,
@@ -1165,7 +1179,7 @@ async def test_run_headless_job_exits_nonzero_on_error_event_without_failed_stat
         await main_module.run_headless_job(
             workspace_dir=tmp_path,
             task_input="Create issue",
-            planner_model="test-model",
+            model="test-model",
             mode="ISSUE_WRITER",
             tags=ISSUE_TAGS,
         )
@@ -1196,7 +1210,7 @@ async def test_run_headless_job_prints_issue_created_link_from_suppressed_tokens
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
-        planner_model="test-model",
+        model="test-model",
         mode="ISSUE_WRITER",
         tags=ISSUE_TAGS,
     )
@@ -1231,7 +1245,7 @@ async def test_run_headless_job_prints_issue_created_link_from_issue_writer_noti
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
-        planner_model="test-model",
+        model="test-model",
         mode="ISSUE_WRITER",
         tags=ISSUE_TAGS,
     )
@@ -1262,7 +1276,7 @@ async def test_run_headless_job_prints_issue_created_link_from_tool_output_resul
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
-        planner_model="test-model",
+        model="test-model",
         mode="ISSUE_WRITER",
         tags=ISSUE_TAGS,
     )
@@ -1294,7 +1308,7 @@ async def test_run_headless_job_prints_issue_created_link_from_structured_issue_
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
-        planner_model="test-model",
+        model="test-model",
         mode="ISSUE_WRITER",
         tags=ISSUE_TAGS,
     )
@@ -1728,6 +1742,10 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
             "main",
             "--head",
             "feature-branch",
+            "--model",
+            "gpt-test",
+            "--reasoning-effort",
+            "low",
         ],
     )
 
@@ -1739,6 +1757,8 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["body"] == "PR description here"
     assert captured["kwargs"]["base_branch"] == "main"
     assert captured["kwargs"]["head_branch"] == "feature-branch"
+    assert captured["kwargs"]["model"] == "gpt-test"
+    assert captured["kwargs"]["reasoning_effort"] == "low"
 
 
 def test_main_pr_create_omitted_title_body_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -1807,9 +1827,14 @@ async def test_run_pr_create_with_explicit_title_body(monkeypatch, tmp_path, cap
         workspace_dir=tmp_path,
         title="Explicit Title",
         body="Explicit Body",
+        model="gpt-test",
+        reasoning_effort="high",
     )
 
     assert "env" not in captured["init_kwargs"]
+    assert captured["init_kwargs"]["default_model"] == "gpt-test"
+    assert captured["model"] == "gpt-test"
+    assert captured["reasoning_effort"] == "high"
     assert "Use this exact pull request title" in captured["prompt"]
     assert "Explicit Title" in captured["prompt"]
     assert "Use this exact pull request body" in captured["prompt"]
@@ -1921,6 +1946,10 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
             "Fix the bug",
             "--workspace",
             str(tmp_path),
+            "--model",
+            "gpt-test",
+            "--reasoning-effort",
+            "medium",
         ],
     )
 
@@ -1929,6 +1958,8 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
     assert captured["kwargs"]["message"] == "Fix the bug"
+    assert captured["kwargs"]["model"] == "gpt-test"
+    assert captured["kwargs"]["reasoning_effort"] == "medium"
 
 
 def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -1976,11 +2007,16 @@ async def test_run_commit_calls_lifecycle_in_order(monkeypatch, tmp_path) -> Non
     await main_module.run_commit(
         workspace_dir=tmp_path,
         message="My commit message",
+        model="gpt-test",
+        reasoning_effort="medium",
     )
 
     assert "start" in call_order
     assert "run_prompt" in call_order
     assert "stop" in call_order
+    assert captured["init_kwargs"]["default_model"] == "gpt-test"
+    assert captured["model"] == "gpt-test"
+    assert captured["reasoning_effort"] == "medium"
     assert "My commit message" in captured["prompt"]
     assert "Use this exact commit message" in captured["prompt"]
 
@@ -2081,8 +2117,10 @@ def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
             "acme",
             "--repo-name",
             "tools",
-            "--planner-model",
+            "--model",
             "custom-model",
+            "--reasoning-effort",
+            "medium",
             "--verbose",
         ],
     )
@@ -2094,7 +2132,8 @@ def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["pr_number"] == 42
     assert captured["kwargs"]["repo_owner"] == "acme"
     assert captured["kwargs"]["repo_name"] == "tools"
-    assert captured["kwargs"]["planner_model"] == "custom-model"
+    assert captured["kwargs"]["model"] == "custom-model"
+    assert captured["kwargs"]["reasoning_effort"] == "medium"
     assert captured["kwargs"]["verbose"] is True
 
 
@@ -2289,7 +2328,7 @@ def test_main_pr_review_explicit_params_override_inference(monkeypatch, tmp_path
     assert captured["kwargs"]["repo_name"] == "explicit-repo"
 
 
-def test_main_pr_review_uses_default_planner_model(monkeypatch, tmp_path) -> None:
+def test_main_pr_review_uses_default_anvil_model(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
 
     async def fake_run_pr_review_job(**kwargs: Any) -> None:
@@ -2317,7 +2356,8 @@ def test_main_pr_review_uses_default_planner_model(monkeypatch, tmp_path) -> Non
 
     main_module.main()
 
-    assert captured["kwargs"]["planner_model"] == "gpt-5.4"
+    assert captured["kwargs"]["model"] is None
+    assert captured["kwargs"]["reasoning_effort"] is None
 
 
 def test_infer_github_repo_from_remote_https_format(monkeypatch, tmp_path) -> None:
@@ -2453,13 +2493,16 @@ async def test_run_pr_review_job_submits_anvil_prompt(monkeypatch, tmp_path) -> 
         pr_number=42,
         repo_owner="test-owner",
         repo_name="test-repo",
-        planner_model="gpt-4",
+        model="gpt-4",
+        reasoning_effort="medium",
     )
 
     assert "start" in call_order
     assert "run_prompt" in call_order
     assert "env" not in captured["init_kwargs"]
+    assert captured["init_kwargs"]["default_model"] == "gpt-4"
     assert captured["model"] == "gpt-4"
+    assert captured["reasoning_effort"] == "medium"
     assert "test-owner/test-repo" in captured["prompt"]
     assert "pull request #42" in captured["prompt"].lower()
 
@@ -2482,7 +2525,7 @@ async def test_run_pr_review_job_exits_nonzero_on_failed_state(
             pr_number=42,
             repo_owner="test-owner",
             repo_name="test-repo",
-            planner_model="gpt-4",
+            model="gpt-4",
         )
 
     assert exc.value.code == 1

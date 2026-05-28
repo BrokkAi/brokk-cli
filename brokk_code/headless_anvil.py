@@ -24,6 +24,9 @@ from brokk_code import __version__
 from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, resolve_anvil_binary
 from brokk_code.workspace import resolve_workspace_dir
 
+ANVIL_MODEL_CONFIG_ID = "model_selection"
+ANVIL_REASONING_EFFORT_CONFIG_ID = "reasoning_effort"
+
 
 class HeadlessAnvilError(Exception):
     """Raised when headless Anvil ACP execution fails before prompt completion."""
@@ -113,14 +116,16 @@ class HeadlessAcpClient:
         prompt: str,
         *,
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Submit a prompt and yield normalized events until completion."""
         if self._connection is None or self.session_id is None:
             raise HeadlessAnvilError("Anvil ACP client not started")
 
         if model:
-            with contextlib.suppress(Exception):
-                await self._connection.set_session_model(model_id=model, session_id=self.session_id)
+            await self._set_config_option(ANVIL_MODEL_CONFIG_ID, model)
+        if reasoning_effort:
+            await self._set_config_option(ANVIL_REASONING_EFFORT_CONFIG_ID, reasoning_effort)
 
         prompt_task = asyncio.create_task(
             self._connection.prompt(
@@ -151,6 +156,20 @@ class HeadlessAcpClient:
         elif response.stop_reason == "refusal":
             state = "FAILED"
         yield {"type": "STATE_CHANGE", "data": {"state": state}}
+
+    async def _set_config_option(self, config_id: str, value: str) -> None:
+        if self._connection is None or self.session_id is None:
+            raise HeadlessAnvilError("Anvil ACP client not started")
+        try:
+            await self._connection.set_config_option(
+                config_id=config_id,
+                session_id=self.session_id,
+                value=value,
+            )
+        except Exception as exc:
+            raise HeadlessAnvilError(
+                f"Anvil rejected session option {config_id}={value!r}: {exc}"
+            ) from exc
 
     async def session_update(self, session_id: str, update: Any) -> None:
         """Receive ACP session/update notifications from Anvil."""

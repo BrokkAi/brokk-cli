@@ -60,6 +60,12 @@ This mode is headless and intended for ACP-compatible clients. On first use
 brokk-code resolves Anvil in this order: `--anvil-binary` override > `anvil`
 on `$PATH` > a downloaded release pinned to the bundled Anvil version.
 
+Headless task commands (`brokk exec`, `brokk commit`, `brokk pr create`,
+`brokk pr review`, and `brokk issue ...`) also run through Anvil ACP. Pass
+`--model <id>` to set Anvil's `model_selection` session option for that task,
+and `--reasoning-effort <level>` to set Anvil's `reasoning_effort` session
+option. If `--model` is omitted, Anvil chooses its own discovered default.
+
 ### Bifrost MCP Mode
 
 Run the [bifrost](https://github.com/BrokkAi/bifrost) (Rust) MCP server over stdio:
@@ -162,7 +168,9 @@ The Python CLI supports creating GitHub issues based on repository evidence via 
 # Example: Create an issue for a discovered bug
 brokk issue create "Describe the NPE in AuthService" \
   --repo-owner acme-corp \
-  --repo-name service-api
+  --repo-name service-api \
+  --model codex::gpt-5.2 \
+  --reasoning-effort medium
 ```
 
 **Required Arguments:**

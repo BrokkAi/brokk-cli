@@ -39,10 +39,6 @@ from brokk_code.uv_utils import UvSetupError, ensure_uv_ready
 from brokk_code.workspace import resolve_workspace_dir
 from brokk_code.zed_config import ExistingBrokkCodeEntryError, configure_zed_acp_settings
 
-# Default model names used across CLI subcommands
-DEFAULT_PLANNER_MODEL = "gpt-5.4"
-DEFAULT_CODE_MODEL = "gemini-3-flash-preview"
-
 REPO_COMPONENT_ALLOWLIST_REGEX = r"^[A-Za-z0-9_.-]+$"
 
 
@@ -84,10 +80,7 @@ def _resolve_neovim_plugin(*, plugin: str | None) -> str:
     raise ValueError(f"Invalid plugin selection: '{choice}'")
 
 
-def _add_github_issue_args(
-    parser: argparse.ArgumentParser,
-    planner_model_default: str = DEFAULT_CODE_MODEL,
-) -> None:
+def _add_github_issue_args(parser: argparse.ArgumentParser) -> None:
     """Add common GitHub issue arguments to a parser."""
     parser.add_argument(
         "--repo-owner",
@@ -99,18 +92,28 @@ def _add_github_issue_args(
         type=str,
         help="GitHub repository name",
     )
-    parser.add_argument(
-        "--planner-model",
-        type=str,
-        default=planner_model_default,
-        help=f"LLM model for planning/analysis (default: {planner_model_default})",
-    )
+    _add_anvil_selection_args(parser)
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         default=False,
         help="Show full Anvil ACP output (events/tokens) for debugging",
+    )
+
+
+def _add_anvil_selection_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Anvil model id to use for the task (default: Anvil chooses)",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        type=str,
+        default=None,
+        help="Anvil reasoning effort to set for the task (for example: low, medium, high)",
     )
 
 
@@ -252,9 +255,6 @@ def _run_issue_command(
     action_label: str,
     *,
     include_issue_number: bool = False,
-    planner_reasoning_level: str = "disable",
-    code_model: str | None = None,
-    code_reasoning_level: str | None = None,
     skip_verification: bool | None = None,
     max_issue_fix_attempts: int | None = None,
     build_settings: str | None = None,
@@ -279,10 +279,8 @@ def _run_issue_command(
             run_headless_job(
                 workspace_dir=issue_workspace_path,
                 task_input=task_input,
-                planner_model=args.planner_model,
-                planner_reasoning_level=planner_reasoning_level,
-                code_model=code_model,
-                code_reasoning_level=code_reasoning_level,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
                 skip_verification=skip_verification,
                 max_issue_fix_attempts=max_issue_fix_attempts,
                 verbose=args.verbose,
@@ -465,6 +463,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Commit message (optional; if omitted, a message will be generated)",
     )
+    _add_anvil_selection_args(commit_parser)
 
     exec_parser = subparsers.add_parser(
         "exec", help="Run a prompt with LITE_AGENT (scan + architect, no build)"
@@ -475,30 +474,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         help="The task to execute",
     )
-    exec_parser.add_argument(
-        "--planner-model",
-        type=str,
-        default=DEFAULT_PLANNER_MODEL,
-        help=f"LLM model for planning (default: {DEFAULT_PLANNER_MODEL})",
-    )
-    exec_parser.add_argument(
-        "--code-model",
-        type=str,
-        default=DEFAULT_CODE_MODEL,
-        help=f"LLM model for code generation (default: {DEFAULT_CODE_MODEL})",
-    )
-    exec_parser.add_argument(
-        "--planner-reasoning-level",
-        type=str,
-        default="high",
-        help="Reasoning level for planner model (default: high)",
-    )
-    exec_parser.add_argument(
-        "--code-reasoning-level",
-        type=str,
-        default=None,
-        help="Reasoning level for code model (default: none)",
-    )
+    _add_anvil_selection_args(exec_parser)
     exec_parser.add_argument(
         "-v",
         "--verbose",
@@ -541,26 +517,7 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="The GitHub issue number to solve",
     )
-    _add_github_issue_args(issue_solve_parser, planner_model_default=DEFAULT_PLANNER_MODEL)
-    # Additional solve-specific arguments
-    issue_solve_parser.add_argument(
-        "--code-model",
-        type=str,
-        default=DEFAULT_CODE_MODEL,
-        help=f"LLM model for code generation (default: {DEFAULT_CODE_MODEL})",
-    )
-    issue_solve_parser.add_argument(
-        "--planner-reasoning-level",
-        type=str,
-        default="high",
-        help="Reasoning level for planner model (default: high)",
-    )
-    issue_solve_parser.add_argument(
-        "--code-reasoning-level",
-        type=str,
-        default="disable",
-        help="Reasoning level for code model (default: disable)",
-    )
+    _add_github_issue_args(issue_solve_parser)
     issue_solve_parser.add_argument(
         "--skip-verification",
         action="store_true",
@@ -610,6 +567,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Source/head branch (defaults to current branch)",
     )
+    _add_anvil_selection_args(pr_create_parser)
     pr_review_parser = pr_subparsers.add_parser("review", help="Review a pull request")
     _add_common_runtime_args(pr_review_parser)
     pr_review_parser.add_argument(
@@ -630,12 +588,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="GitHub repository name (inferred from git remote if omitted)",
     )
-    pr_review_parser.add_argument(
-        "--planner-model",
-        type=str,
-        default=DEFAULT_PLANNER_MODEL,
-        help=f"LLM model for the review (default: {DEFAULT_PLANNER_MODEL})",
-    )
+    _add_anvil_selection_args(pr_review_parser)
     pr_review_parser.add_argument(
         "--severity",
         type=str,
@@ -660,6 +613,8 @@ def _build_parser() -> argparse.ArgumentParser:
 async def run_commit(
     workspace_dir: Path,
     message: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
@@ -668,6 +623,7 @@ async def run_commit(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
+        default_model=model,
     )
 
     try:
@@ -676,7 +632,11 @@ async def run_commit(
         last_error: str | None = None
         last_state: str | None = None
         prompt = build_commit_prompt(message=message)
-        async for event in manager.run_prompt(prompt):
+        async for event in manager.run_prompt(
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
             event_type = event.get("type")
             data = safe_data(event)
             text = _extract_event_text(event)
@@ -726,6 +686,8 @@ async def run_pr_create(
     body: str | None = None,
     base_branch: str | None = None,
     head_branch: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
@@ -734,6 +696,7 @@ async def run_pr_create(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
+        default_model=model,
     )
 
     try:
@@ -747,7 +710,11 @@ async def run_pr_create(
             base_branch=base_branch,
             head_branch=head_branch,
         )
-        async for event in manager.run_prompt(prompt):
+        async for event in manager.run_prompt(
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
             event_type = event.get("type")
             data = safe_data(event)
             text = _extract_event_text(event)
@@ -785,7 +752,8 @@ async def run_pr_review_job(
     pr_number: int,
     repo_owner: str,
     repo_name: str,
-    planner_model: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     severity_threshold: str | None = None,
     verbose: bool = False,
     anvil_binary: Path | None = None,
@@ -796,7 +764,7 @@ async def run_pr_review_job(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
-        default_model=planner_model,
+        default_model=model,
     )
 
     stage = "initializing"
@@ -872,7 +840,11 @@ async def run_pr_review_job(
 
         stage = "streaming ACP events"
         _update_shutdown_context()
-        async for event in manager.run_prompt(prompt, model=planner_model):
+        async for event in manager.run_prompt(
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
             _render_spinner()
             event_type = event.get("type")
             data = safe_data(event)
@@ -951,12 +923,10 @@ async def run_pr_review_job(
 async def run_headless_job(
     workspace_dir: Path,
     task_input: str,
-    planner_model: str,
     mode: str,
     tags: dict[str, str],
-    planner_reasoning_level: str | None = None,
-    code_reasoning_level: str | None = None,
-    code_model: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     skip_verification: bool | None = None,
     max_issue_fix_attempts: int | None = None,
     verbose: bool = False,
@@ -968,7 +938,7 @@ async def run_headless_job(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
         anvil_version=anvil_version,
-        default_model=planner_model,
+        default_model=model,
     )
 
     stage = "initializing"
@@ -1076,7 +1046,11 @@ async def run_headless_job(
 
         stage = "streaming ACP events"
         _update_shutdown_context()
-        async for event in manager.run_prompt(prompt, model=planner_model):
+        async for event in manager.run_prompt(
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
             _render_spinner()
             event_type = event.get("type")
             data = safe_data(event)
@@ -1520,10 +1494,8 @@ def _main_dispatch(
             run_headless_job(
                 workspace_dir=workspace_path,
                 task_input=args.prompt,
-                planner_model=args.planner_model,
-                code_model=args.code_model,
-                planner_reasoning_level=args.planner_reasoning_level,
-                code_reasoning_level=args.code_reasoning_level,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
                 mode="LITE_AGENT",
                 tags={"mode": "LITE_AGENT"},
                 verbose=args.verbose,
@@ -1538,6 +1510,8 @@ def _main_dispatch(
             run_commit(
                 workspace_dir=workspace_path,
                 message=args.message,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
                 anvil_binary=args.anvil_binary,
                 anvil_version=args.anvil_version,
             )
@@ -1553,6 +1527,8 @@ def _main_dispatch(
                     body=args.body,
                     base_branch=args.base,
                     head_branch=args.head,
+                    model=args.model,
+                    reasoning_effort=args.reasoning_effort,
                     anvil_binary=args.anvil_binary,
                     anvil_version=args.anvil_version,
                 )
@@ -1575,7 +1551,8 @@ def _main_dispatch(
                     pr_number=args.pr_number,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
-                    planner_model=args.planner_model,
+                    model=args.model,
+                    reasoning_effort=args.reasoning_effort,
                     severity_threshold=args.severity,
                     verbose=args.verbose,
                     anvil_binary=args.anvil_binary,
@@ -1614,9 +1591,6 @@ def _main_dispatch(
                 task_input=f"Resolve GitHub Issue #{args.issue_number}",
                 action_label="Issue solve",
                 include_issue_number=True,
-                planner_reasoning_level=args.planner_reasoning_level,
-                code_model=args.code_model,
-                code_reasoning_level=args.code_reasoning_level,
                 skip_verification=args.skip_verification,
                 max_issue_fix_attempts=args.max_issue_fix_attempts,
                 build_settings=args.build_settings,

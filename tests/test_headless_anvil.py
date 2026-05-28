@@ -13,6 +13,7 @@ from acp.schema import (
     NewSessionResponse,
     PlanEntry,
     PromptResponse,
+    SetSessionConfigOptionResponse,
     SetSessionModelResponse,
 )
 
@@ -126,7 +127,7 @@ class _SdkTestAgent:
     def __init__(self) -> None:
         self.client: Any = None
         self.cwd: str | None = None
-        self.model_id: str | None = None
+        self.config_options: dict[str, str] = {}
         self.prompt_text: str | None = None
 
     def on_connect(self, client: Any) -> None:
@@ -146,8 +147,18 @@ class _SdkTestAgent:
         **_kwargs: Any,
     ) -> SetSessionModelResponse:
         assert session_id == "sdk-test-session"
-        self.model_id = model_id
         return SetSessionModelResponse()
+
+    async def set_config_option(
+        self,
+        config_id: str,
+        session_id: str,
+        value: str,
+        **_kwargs: Any,
+    ) -> SetSessionConfigOptionResponse:
+        assert session_id == "sdk-test-session"
+        self.config_options[config_id] = value
+        return SetSessionConfigOptionResponse(configOptions=[])
 
     async def prompt(
         self,
@@ -249,12 +260,20 @@ async def test_headless_acp_client_round_trips_against_sdk_agent(
 
     await client.start()
     try:
-        events = [event async for event in client.run_prompt("hello ACP", model="chosen-model")]
+        events = [
+            event
+            async for event in client.run_prompt(
+                "hello ACP",
+                model="chosen-model",
+                reasoning_effort="high",
+            )
+        ]
     finally:
         await client.stop()
 
     assert agent.cwd == str(tmp_path)
-    assert agent.model_id == "chosen-model"
+    assert agent.config_options["model_selection"] == "chosen-model"
+    assert agent.config_options["reasoning_effort"] == "high"
     assert agent.prompt_text == "hello ACP"
     assert {"type": "LLM_TOKEN", "data": {"token": "starting "}} in events
     assert {"type": "LLM_TOKEN", "data": {"token": "done"}} in events

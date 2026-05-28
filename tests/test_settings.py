@@ -9,9 +9,7 @@ def test_settings_default_load(tmp_path, monkeypatch):
     # File doesn't exist
     settings = Settings.load()
     assert settings.last_model is None
-    assert settings.last_code_model is None
-    assert settings.last_reasoning_level is None
-    assert settings.last_code_reasoning_level is None
+    assert settings.last_reasoning_effort is None
     assert settings.last_auto_commit is None
 
 
@@ -28,7 +26,7 @@ def test_settings_model_persistence(tmp_path, monkeypatch):
 def test_settings_save_and_load(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    settings = Settings(last_reasoning_level="medium")
+    settings = Settings(last_reasoning_effort="medium")
     settings.save()
 
     # Verify file exists where expected
@@ -37,7 +35,7 @@ def test_settings_save_and_load(tmp_path, monkeypatch):
 
     # Load back
     loaded = Settings.load()
-    assert loaded.last_reasoning_level == "medium"
+    assert loaded.last_reasoning_effort == "medium"
 
 
 def test_settings_malformed_json_fallback(tmp_path, monkeypatch):
@@ -55,13 +53,13 @@ def test_settings_malformed_json_fallback(tmp_path, monkeypatch):
 def test_settings_atomic_save(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    settings = Settings(last_code_model="gemini-3-flash-preview")
+    settings = Settings(last_model="gpt-test")
     settings.save()
 
     settings_file = tmp_path / ".brokk" / "settings.json"
     with settings_file.open("r") as f:
         data = json.load(f)
-    assert data["last_code_model"] == "gemini-3-flash-preview"
+    assert data["last_model"] == "gpt-test"
 
 
 def test_settings_ignores_legacy_tui_keys(tmp_path, monkeypatch):
@@ -81,18 +79,14 @@ def test_settings_models_roundtrip(tmp_path, monkeypatch):
 
     settings = Settings(
         last_model="gpt-5.2",
-        last_code_model="gemini-3-flash-preview",
-        last_reasoning_level="medium",
-        last_code_reasoning_level="disable",
+        last_reasoning_effort="medium",
         last_auto_commit=False,
     )
     settings.save()
 
     loaded = Settings.load()
     assert loaded.last_model == "gpt-5.2"
-    assert loaded.last_code_model == "gemini-3-flash-preview"
-    assert loaded.last_reasoning_level == "medium"
-    assert loaded.last_code_reasoning_level == "disable"
+    assert loaded.last_reasoning_effort == "medium"
     assert loaded.last_auto_commit is False
 
 
@@ -110,9 +104,7 @@ def test_settings_load_from_older_json_without_new_keys(tmp_path, monkeypatch):
 
     loaded = Settings.load()
     assert loaded.last_model is None
-    assert loaded.last_code_model is None
-    assert loaded.last_reasoning_level is None
-    assert loaded.last_code_reasoning_level is None
+    assert loaded.last_reasoning_effort is None
     assert loaded.last_auto_commit is None
 
 
