@@ -26,6 +26,7 @@ from brokk_code.workspace import resolve_workspace_dir
 
 ANVIL_MODEL_CONFIG_ID = "model_selection"
 ANVIL_REASONING_EFFORT_CONFIG_ID = "reasoning_effort"
+ANVIL_READY_MESSAGE = "Anvil is ready. Run `/setup` anytime to change or repair model setup."
 
 
 class HeadlessAnvilError(Exception):
@@ -449,6 +450,8 @@ def _session_update_to_event(update: Any) -> dict[str, Any] | None:
     update_kind = getattr(update, "session_update", "")
     if update_kind in {"agent_message_chunk", "agent_thought_chunk"}:
         text = _content_text(getattr(update, "content", None))
+        if text.strip().startswith(ANVIL_READY_MESSAGE):
+            return {"type": "NOTIFICATION", "data": {"level": "INFO", "message": text.strip()}}
         if text:
             return {"type": "LLM_TOKEN", "data": {"token": text}}
     if update_kind == "tool_call":

@@ -19,6 +19,7 @@ from acp.schema import (
 
 import brokk_code.headless_anvil as headless_anvil_module
 from brokk_code.headless_anvil import (
+    ANVIL_READY_MESSAGE,
     HeadlessAcpClient,
     HeadlessAnvilError,
     _session_update_to_event,
@@ -115,6 +116,15 @@ def test_session_update_to_event_maps_agent_text_to_llm_token() -> None:
     event = _session_update_to_event(update_agent_message_text("hello"))
 
     assert event == {"type": "LLM_TOKEN", "data": {"token": "hello"}}
+
+
+def test_session_update_to_event_maps_anvil_ready_message_to_notification() -> None:
+    event = _session_update_to_event(update_agent_message_text(ANVIL_READY_MESSAGE))
+
+    assert event == {
+        "type": "NOTIFICATION",
+        "data": {"level": "INFO", "message": ANVIL_READY_MESSAGE},
+    }
 
 
 def test_session_update_to_event_maps_plan_to_tool_output() -> None:

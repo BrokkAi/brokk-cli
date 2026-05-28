@@ -618,7 +618,7 @@ def _post_github_issue_comment(
     cwd: Path | None = None,
 ) -> str:
     _ensure_gh_available(action_label="Issue comment")
-    return _run_gh(
+    _run_gh(
         [
             "issue",
             "comment",
@@ -631,6 +631,69 @@ def _post_github_issue_comment(
         cwd=cwd,
         action_label="issue comment",
     )
+    comment_url = _find_github_issue_comment_url(
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        issue_number=issue_number,
+        body=body,
+        cwd=cwd,
+    )
+    if not comment_url:
+        _die("issue comment did not appear on GitHub after gh returned success")
+    return comment_url
+
+
+def _find_github_issue_comment_url(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    body: str,
+    cwd: Path | None = None,
+) -> str:
+    output = _run_gh(
+        [
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--comments",
+            "--json",
+            "comments",
+        ],
+        cwd=cwd,
+        action_label="issue comment verification",
+    )
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return ""
+    comments = data.get("comments")
+    if not isinstance(comments, list):
+        return ""
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        if comment.get("body") != body:
+            continue
+        url = comment.get("url")
+        return url.strip() if isinstance(url, str) else ""
+    return ""
+
+
+def _validate_issue_diagnosis_body(diagnosis: str) -> None:
+    lower = diagnosis.lower()
+    if "<!-- brokk:diagnosis" in lower:
+        raise ValueError("diagnosis included the Brokk diagnosis wrapper")
+    if "## issue analysis" in lower:
+        raise ValueError("diagnosis included the Issue Analysis heading")
+    if "**next steps:**" in lower or "brokk issue solve" in lower:
+        raise ValueError("diagnosis included CLI next-step instructions")
+    if "anvil is ready. run `/setup`" in lower:
+        raise ValueError("diagnosis included the Anvil startup message")
+    if "llm request failed" in lower:
+        raise ValueError("diagnosis included an LLM failure message")
 
 
 def _fetch_github_issue_context(
@@ -1562,6 +1625,11 @@ async def run_headless_job(
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            try:
+                _validate_issue_diagnosis_body(diagnosis)
+            except ValueError as e:
+                print(f"Anvil ACP error during {mode} job: {e}", file=sys.stderr)
+                sys.exit(1)
             issue_number = int(tags["issue_number"])
             timestamp = datetime.now(UTC).isoformat()
             solve_command = (
@@ -1581,14 +1649,14 @@ async def run_headless_job(
 
 `{solve_command}`
 """.strip()
-            _post_github_issue_comment(
+            comment_url = _post_github_issue_comment(
                 repo_owner=tags["repo_owner"],
                 repo_name=tags["repo_name"],
                 issue_number=issue_number,
                 body=comment_body,
                 cwd=workspace_dir,
             )
-            print(f"Diagnosis posted to issue #{issue_number}.")
+            print(f"Diagnosis posted: {comment_url}")
         else:
             print("Job finished.")
 

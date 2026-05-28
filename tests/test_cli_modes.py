@@ -72,6 +72,65 @@ def _stub_install_warmup(monkeypatch, stub_api_key: bool = True) -> None:
     )
 
 
+def test_post_github_issue_comment_verifies_comment_url(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+    body = "diagnosis body"
+
+    def fake_run_gh(args: list[str], **_kwargs: Any) -> str:
+        calls.append(args)
+        if args[:2] == ["issue", "comment"]:
+            return ""
+        if args[:2] == ["issue", "view"]:
+            return (
+                '{"comments":['
+                '{"body":"old","url":"https://example.invalid/old"},'
+                '{"body":"diagnosis body","url":"https://github.com/acme/tools/issues/9#c1"}'
+                "]}"
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(main_module, "_ensure_gh_available", lambda **_kwargs: None)
+    monkeypatch.setattr(main_module, "_run_gh", fake_run_gh)
+
+    url = main_module._post_github_issue_comment(
+        repo_owner="acme",
+        repo_name="tools",
+        issue_number=9,
+        body=body,
+        cwd=tmp_path,
+    )
+
+    assert url == "https://github.com/acme/tools/issues/9#c1"
+    assert calls[0][:2] == ["issue", "comment"]
+    assert calls[1][:2] == ["issue", "view"]
+
+
+def test_post_github_issue_comment_exits_when_comment_is_not_verified(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    def fake_run_gh(args: list[str], **_kwargs: Any) -> str:
+        if args[:2] == ["issue", "comment"]:
+            return ""
+        if args[:2] == ["issue", "view"]:
+            return '{"comments":[]}'
+        raise AssertionError(args)
+
+    monkeypatch.setattr(main_module, "_ensure_gh_available", lambda **_kwargs: None)
+    monkeypatch.setattr(main_module, "_run_gh", fake_run_gh)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module._post_github_issue_comment(
+            repo_owner="acme",
+            repo_name="tools",
+            issue_number=9,
+            body="diagnosis body",
+            cwd=tmp_path,
+        )
+
+    assert exc.value.code == 1
+    assert "did not appear on GitHub" in capsys.readouterr().err
+
+
 @pytest.mark.asyncio
 async def test_run_anvil_text_prompt_verbose_prints_acp_events(
     monkeypatch, tmp_path, capsys
@@ -1407,7 +1466,9 @@ async def test_run_headless_job_issue_diagnose_posts_only_agent_text(
     )
 
     captured = capsys.readouterr()
-    assert "Diagnosis posted to issue #9." in captured.out
+    assert (
+        "Diagnosis posted: https://github.com/brokkai/brokk/issues/9#issuecomment-1" in captured.out
+    )
     assert "[INFO] Read src/app.rs" in captured.out
     assert "[TOOL_OUTPUT]" in captured.out
     assert "The bug is in event rendering." in captured_comment["body"]
@@ -1442,6 +1503,73 @@ async def test_run_headless_job_issue_diagnose_exits_when_no_agent_text(
     captured = capsys.readouterr()
     assert exc.value.code == 1
     assert "no agent response text received" in captured.err
+    assert "Diagnosis posted" not in captured.out
+
+
+@pytest.mark.asyncio
+async def test_run_headless_job_issue_diagnose_rejects_wrapped_diagnosis(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "LLM_TOKEN",
+                "data": {
+                    "token": (
+                        '<!-- brokk:diagnosis:v1 timestamp="2026-05-28T09:30:00Z" -->\n\n'
+                        "## Issue Analysis\n\nAlready wrapped.\n\n"
+                        "**Next steps:** run brokk issue solve"
+                    )
+                },
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_headless_job(
+            workspace_dir=tmp_path,
+            task_input="Diagnose issue",
+            model="test-model",
+            mode="ISSUE_DIAGNOSE",
+            tags={**ISSUE_TAGS, "issue_number": "9"},
+            verbose=True,
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "diagnosis included the Brokk diagnosis wrapper" in captured.err
+    assert "Diagnosis posted" not in captured.out
+
+
+@pytest.mark.asyncio
+async def test_run_headless_job_issue_diagnose_rejects_llm_error_text(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "LLM_TOKEN",
+                "data": {"token": "**Error:** LLM request failed: provider unavailable"},
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_headless_job(
+            workspace_dir=tmp_path,
+            task_input="Diagnose issue",
+            model="test-model",
+            mode="ISSUE_DIAGNOSE",
+            tags={**ISSUE_TAGS, "issue_number": "9"},
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "diagnosis included an LLM failure message" in captured.err
     assert "Diagnosis posted" not in captured.out
 
 
