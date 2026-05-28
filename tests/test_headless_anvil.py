@@ -44,8 +44,9 @@ def test_build_issue_writer_prompt_includes_create_contract() -> None:
         },
     )
 
-    assert "Create a GitHub issue in acme/service" in prompt
-    assert "ISSUE_WRITER: issue created <issue-url>" in prompt
+    assert "Draft a GitHub issue for acme/service" in prompt
+    assert '"title": "Issue title"' in prompt
+    assert "Do not create the issue" in prompt
     assert "Investigate auth failure" in prompt
 
 
@@ -60,9 +61,8 @@ def test_build_issue_diagnose_prompt_uses_stolen_issue_format() -> None:
         },
     )
 
-    assert "# GitHub Issue #123: <title>" in prompt
-    assert "## Description" in prompt
-    assert "## Comments" in prompt
+    assert "Diagnose GitHub Issue #123" in prompt
+    assert "Use this issue context" in prompt
     assert "<!-- brokk:diagnosis:v1" in prompt
 
 
@@ -82,10 +82,9 @@ def test_build_pr_review_prompt_includes_threshold() -> None:
 def test_build_commit_prompt_includes_contract_and_message() -> None:
     prompt = build_commit_prompt(message="Fix parser bug")
 
-    assert "Use this exact commit message" in prompt
+    assert "Return this exact git commit message" in prompt
     assert "Fix parser bug" in prompt
-    assert "COMMIT: no changes" in prompt
-    assert "COMMIT: committed <full-sha> <first-line>" in prompt
+    assert "commit" in prompt.lower()
 
 
 def test_headless_anvil_env_preserves_github_auth_tokens(monkeypatch) -> None:
@@ -110,7 +109,8 @@ def test_build_pr_create_prompt_includes_contract_and_branches() -> None:
     assert "Use `feature/acp` as the head branch." in prompt
     assert "Ship ACP" in prompt
     assert "Port headless commands." in prompt
-    assert "PR_CREATE: pull request created <pr-url>" in prompt
+    assert '"title": "Pull request title"' in prompt
+    assert "Do not create the pull request" in prompt
 
 
 def test_session_update_to_event_maps_agent_text_to_llm_token() -> None:

@@ -237,43 +237,59 @@ def build_pr_review_prompt(
     owner: str,
     repo: str,
     pr_number: int,
+    diff: str | None = None,
+    pr_title: str | None = None,
+    pr_description: str | None = None,
     severity_threshold: str | None = None,
 ) -> str:
     severity = severity_threshold or "HIGH"
+    diff_block = diff or "<diff unavailable>"
+    title = pr_title or ""
+    description = pr_description or ""
     return f"""
 Review GitHub pull request #{pr_number} in {owner}/{repo}.
 
-Use the repository's GitHub tooling/authentication, such as `gh`, to fetch the PR title,
-description, changed files, and diff. Review the changes for correctness, security,
-behavioral regressions, and missing tests.
+PR title:
+{title}
 
-Only create inline review comments for findings with severity >= {severity}. If you post
-comments, make them concise and actionable. Finish by summarizing whether the PR has
-blocking issues.
+PR description:
+{description}
+
+Diff:
+```diff
+{diff_block}
+```
+
+Review the changes for correctness, security, behavioral regressions, and missing tests.
+
+Output only a JSON object with this exact shape:
+
+{{
+  "summaryMarkdown": "## Brokk PR Review\\n\\n1-3 sentences describing the most important risks.",
+  "comments": [
+    {{
+      "path": "relative/path.py",
+      "line": 42,
+      "severity": "HIGH",
+      "bodyMarkdown": "Concise actionable review finding."
+    }}
+  ]
+}}
+
+Only include comments with severity >= {severity}. Use an empty comments array if nothing
+meets that threshold. Do not post anything to GitHub; the CLI will post the review.
 """.strip()
 
 
 def build_commit_prompt(*, message: str | None = None) -> str:
-    """Build an Anvil prompt for committing current repository changes."""
-    message_guidance = (
-        f"Use this exact commit message:\n\n{message.strip()}"
-        if message and message.strip()
-        else "Derive a concise commit message from the staged and unstaged changes."
-    )
-    return f"""
-Commit the current repository changes in this workspace.
+    """Build an Anvil prompt for deriving a commit message."""
+    if message and message.strip():
+        return f"Return this exact git commit message and nothing else:\n\n{message.strip()}"
+    return """
+Inspect the staged and unstaged repository changes and derive one concise git commit
+message.
 
-Inspect `git status` and the relevant staged and unstaged diffs. If there are no
-uncommitted changes, make no commit and print this exact line:
-
-COMMIT: no changes
-
-Otherwise stage the appropriate current changes, create one commit, and do not push.
-{message_guidance}
-
-After the commit succeeds, print this exact line:
-
-COMMIT: committed <full-sha> <first-line>
+Output only the commit message. Do not stage files, do not commit, and do not run git.
 """.strip()
 
 
@@ -284,7 +300,7 @@ def build_pr_create_prompt(
     base_branch: str | None = None,
     head_branch: str | None = None,
 ) -> str:
-    """Build an Anvil prompt for creating a GitHub pull request."""
+    """Build an Anvil prompt for deriving pull request text."""
     title_guidance = (
         f"Use this exact pull request title:\n\n{title.strip()}"
         if title and title.strip()
@@ -306,18 +322,21 @@ def build_pr_create_prompt(
         else "Use the current branch as the head branch."
     )
     return f"""
-Create a GitHub pull request for this repository.
+Draft GitHub pull request metadata for this repository.
 
-Use the repository's GitHub tooling/authentication, such as `gh`.
 {base_guidance}
 {head_guidance}
 {title_guidance}
 {body_guidance}
 
-Create exactly one pull request. When the pull request has been created, print this exact
-line:
+Output only a JSON object with this exact shape:
 
-PR_CREATE: pull request created <pr-url>
+{{
+  "title": "Pull request title",
+  "body": "Markdown pull request body"
+}}
+
+Do not create the pull request and do not run GitHub commands; the CLI will create it.
 """.strip()
 
 
@@ -325,18 +344,20 @@ def _issue_writer_prompt(*, task_input: str, tags: dict[str, str]) -> str:
     owner = _required_tag(tags, "repo_owner")
     repo = _required_tag(tags, "repo_name")
     return f"""
-Create a GitHub issue in {owner}/{repo}.
+Draft a GitHub issue for {owner}/{repo}.
 
-Use the repository's GitHub tooling/authentication, such as `gh`. Inspect the repository
-for evidence relevant to this request:
+Inspect the repository for evidence relevant to this request:
 
 {task_input}
 
-Derive a clear issue title and Markdown body from the evidence. Then create the issue via
-the GitHub API or GitHub CLI. When the issue has been created, print a line in this exact
-shape:
+Output only a JSON object with this exact shape:
 
-ISSUE_WRITER: issue created <issue-url>
+{{
+  "title": "Issue title",
+  "body": "Markdown issue body"
+}}
+
+Do not create the issue and do not run GitHub commands; the CLI will create it.
 """.strip()
 
 
@@ -344,38 +365,21 @@ def _issue_diagnose_prompt(*, tags: dict[str, str]) -> str:
     owner = _required_tag(tags, "repo_owner")
     repo = _required_tag(tags, "repo_name")
     issue_number = _required_tag(tags, "issue_number")
+    issue_context = tags.get("issue_context", "").strip() or "(No issue context provided)"
     return f"""
 Diagnose GitHub Issue #{issue_number} in {owner}/{repo}.
 
-Use the repository's GitHub tooling/authentication, such as `gh`. Fetch the issue title,
-body, the most recent comments, and any relevant repository context. Format the issue
-context with this structure before analyzing it:
+Use this issue context plus the repository files available in this workspace:
 
-# GitHub Issue #{issue_number}: <title>
+{issue_context}
 
-## Description
-
-<issue body or "(No description provided)">
-
-## Comments
-
-<most recent comments, newest relevant context preserved>
-
-Post a GitHub issue comment containing:
+Output only Markdown for the diagnosis body that will be inserted under:
 
 <!-- brokk:diagnosis:v1 timestamp="<current ISO timestamp>" -->
 
 ## Issue Analysis
 
-<your diagnosis>
-
----
-
-**Next steps:** To fix this issue, run:
-
-`brokk issue solve --issue-number {issue_number} --repo-owner {owner} --repo-name {repo}`
-
-Finish by reporting that the diagnosis was posted.
+Do not post the comment and do not run GitHub commands; the CLI will post it.
 """.strip()
 
 

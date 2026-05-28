@@ -1203,16 +1203,24 @@ async def test_run_headless_job_uses_nested_event_data_for_errors_and_quiet_noti
 async def test_run_headless_job_verbose_shows_full_event_output(
     monkeypatch, tmp_path, capsys
 ) -> None:
+    captured_issue: dict[str, Any] = {}
     _patch_headless_client(
         monkeypatch,
         events=[
             {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "planning"}},
             {"type": "STATE_CHANGE", "data": {"state": "RUNNING"}},
-            {"type": "LLM_TOKEN", "data": {"token": "hello"}},
+            {"type": "LLM_TOKEN", "data": {"token": '{"title":"Bug","body":"Body"}'}},
             {"type": "COMMAND_RESULT", "data": {"command": "gh issue create", "output": "ok"}},
             {"type": "TOOL_OUTPUT", "data": {"text": "tool text"}},
             {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
         ],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_github_issue",
+        lambda **kwargs: (
+            captured_issue.update(kwargs) or "https://github.com/brokkai/brokk/issues/1"
+        ),
     )
 
     await main_module.run_headless_job(
@@ -1227,9 +1235,10 @@ async def test_run_headless_job_verbose_shows_full_event_output(
     captured = capsys.readouterr()
     assert "[INFO] planning" in captured.out
     assert "Job state: RUNNING" in captured.out
-    assert "hello" in captured.out
+    assert '{"title":"Bug","body":"Body"}' in captured.out
     assert "[COMMAND_RESULT]" in captured.out
     assert "[TOOL_OUTPUT]" in captured.out
+    assert captured_issue["title"] == "Bug"
 
 
 @pytest.mark.asyncio
@@ -1262,19 +1271,26 @@ async def test_run_headless_job_exits_nonzero_on_error_event_without_failed_stat
 
 
 @pytest.mark.asyncio
-async def test_run_headless_job_prints_issue_created_link_from_suppressed_tokens(
+async def test_run_headless_job_creates_issue_from_anvil_json(
     monkeypatch, tmp_path, capsys
 ) -> None:
+    captured_issue: dict[str, Any] = {}
     _patch_headless_client(
         monkeypatch,
         events=[
-            {"type": "LLM_TOKEN", "data": {"token": "Created issue: "}},
             {
                 "type": "LLM_TOKEN",
-                "data": {"token": "https://github.com/brokkai/brokk/issues/123"},
+                "data": {"token": '{"title":"Auth failure","body":"Investigate login."}'},
             },
             {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
         ],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_github_issue",
+        lambda **kwargs: (
+            captured_issue.update(kwargs) or "https://github.com/brokkai/brokk/issues/123"
+        ),
     )
 
     await main_module.run_headless_job(
@@ -1287,104 +1303,38 @@ async def test_run_headless_job_prints_issue_created_link_from_suppressed_tokens
 
     captured = capsys.readouterr()
     assert "Issue created: https://github.com/brokkai/brokk/issues/123" in captured.out
+    assert captured_issue["repo_owner"] == "brokkai"
+    assert captured_issue["repo_name"] == "brokk"
+    assert captured_issue["title"] == "Auth failure"
+    assert captured_issue["body"] == "Investigate login."
     assert "Job submitted:" not in captured.out
     assert "Job finished." not in captured.out
 
 
 @pytest.mark.asyncio
-async def test_run_headless_job_prints_issue_created_link_from_issue_writer_notification(
+async def test_run_headless_job_exits_when_issue_json_is_invalid(
     monkeypatch, tmp_path, capsys
 ) -> None:
     _patch_headless_client(
         monkeypatch,
         events=[
-            {
-                "type": "NOTIFICATION",
-                "data": {
-                    "level": "INFO",
-                    "message": (
-                        "ISSUE_WRITER: issue created I_kwDOXYZ "
-                        "https://github.com/brokkai/brokk/issues/456"
-                    ),
-                },
-            },
+            {"type": "LLM_TOKEN", "data": {"token": "not json"}},
             {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
         ],
     )
 
-    await main_module.run_headless_job(
-        workspace_dir=tmp_path,
-        task_input="Create issue",
-        model="test-model",
-        mode="ISSUE_WRITER",
-        tags=ISSUE_TAGS,
-    )
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_headless_job(
+            workspace_dir=tmp_path,
+            task_input="Create issue",
+            model="test-model",
+            mode="ISSUE_WRITER",
+            tags=ISSUE_TAGS,
+        )
 
     captured = capsys.readouterr()
-    assert "Issue created: https://github.com/brokkai/brokk/issues/456" in captured.out
-
-
-@pytest.mark.asyncio
-async def test_run_headless_job_prints_issue_created_link_from_tool_output_result_text(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    _patch_headless_client(
-        monkeypatch,
-        events=[
-            {
-                "type": "TOOL_OUTPUT",
-                "data": {
-                    "resultText": "Created: https://github.com/brokkai/brokk/issues/789",
-                    "name": "createGitHubIssue",
-                    "status": "SUCCESS",
-                },
-            },
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
-    )
-
-    await main_module.run_headless_job(
-        workspace_dir=tmp_path,
-        task_input="Create issue",
-        model="test-model",
-        mode="ISSUE_WRITER",
-        tags=ISSUE_TAGS,
-    )
-
-    captured = capsys.readouterr()
-    assert "Issue created: https://github.com/brokkai/brokk/issues/789" in captured.out
-
-
-@pytest.mark.asyncio
-async def test_run_headless_job_prints_issue_created_link_from_structured_issue_created_event(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    _patch_headless_client(
-        monkeypatch,
-        events=[
-            {
-                "type": "ISSUE_CREATED",
-                "data": {
-                    "issueId": "#987",
-                    "issueUrl": "https://github.com/brokkai/brokk/issues/987",
-                    "repoOwner": "brokkai",
-                    "repoName": "brokk",
-                },
-            },
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
-    )
-
-    await main_module.run_headless_job(
-        workspace_dir=tmp_path,
-        task_input="Create issue",
-        model="test-model",
-        mode="ISSUE_WRITER",
-        tags=ISSUE_TAGS,
-    )
-
-    captured = capsys.readouterr()
-    assert "Issue created: https://github.com/brokkai/brokk/issues/987" in captured.out
+    assert exc.value.code == 1
+    assert "valid JSON object" in captured.err
 
 
 def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -1403,6 +1353,9 @@ def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
     monkeypatch.setattr(main_module, "_temporary_issue_repo_checkout", fake_temp_workspace)
+    monkeypatch.setattr(
+        main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1433,6 +1386,7 @@ def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["tags"]["issue_number"] == "456"
     assert captured["kwargs"]["tags"]["repo_owner"] == "acme"
     assert captured["kwargs"]["tags"]["repo_name"] == "widgets"
+    assert captured["kwargs"]["tags"]["issue_context"] == "issue context"
 
 
 def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -1451,6 +1405,9 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
     monkeypatch.setattr(main_module, "_temporary_issue_repo_checkout", fake_temp_workspace)
+    monkeypatch.setattr(
+        main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1506,6 +1463,9 @@ def test_main_issue_solve_temp_workspace_cleanup_on_keyboard_interrupt(
 
     monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
     monkeypatch.setattr(main_module, "_temporary_issue_repo_checkout", fake_temp_workspace)
+    monkeypatch.setattr(
+        main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1874,22 +1834,12 @@ def test_main_pr_create_missing_subcommand_exits_nonzero(monkeypatch, tmp_path) 
 
 @pytest.mark.asyncio
 async def test_run_pr_create_with_explicit_title_body(monkeypatch, tmp_path, capsys) -> None:
-    """Verifies run_pr_create sends explicit title/body in the ACP prompt."""
-    call_order: list[str] = []
-    captured = _patch_headless_client(
-        monkeypatch,
-        call_order=call_order,
-        events=[
-            {
-                "type": "LLM_TOKEN",
-                "data": {
-                    "token": (
-                        "PR_CREATE: pull request created https://github.com/test/repo/pull/42"
-                    )
-                },
-            },
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
+    """Verifies run_pr_create posts explicit title/body with gh."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_module,
+        "_create_github_pr",
+        lambda **kwargs: captured.update(kwargs) or "https://github.com/test/repo/pull/42",
     )
 
     await main_module.run_pr_create(
@@ -1900,25 +1850,26 @@ async def test_run_pr_create_with_explicit_title_body(monkeypatch, tmp_path, cap
         reasoning_effort="high",
     )
 
-    assert "env" not in captured["init_kwargs"]
-    assert captured["init_kwargs"]["default_model"] == "gpt-test"
-    assert captured["model"] == "gpt-test"
-    assert captured["reasoning_effort"] == "high"
-    assert "Use this exact pull request title" in captured["prompt"]
-    assert "Explicit Title" in captured["prompt"]
-    assert "Use this exact pull request body" in captured["prompt"]
-    assert "Explicit Body" in captured["prompt"]
-    assert "run_prompt" in call_order
-    assert "stop" in call_order
+    assert captured["title"] == "Explicit Title"
+    assert captured["body"] == "Explicit Body"
     assert "https://github.com/test/repo/pull/42" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
 async def test_run_pr_create_derives_title_when_missing(monkeypatch, tmp_path) -> None:
     """Verifies run_pr_create asks Anvil to derive missing title in the ACP prompt."""
-    captured = _patch_headless_client(
-        monkeypatch,
-        events=[{"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}],
+    captured_anvil: dict[str, Any] = {}
+    captured_pr: dict[str, Any] = {}
+
+    async def fake_anvil_text(**kwargs: Any) -> str:
+        captured_anvil.update(kwargs)
+        return '{"title":"Generated title","body":"Generated body"}'
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+    monkeypatch.setattr(
+        main_module,
+        "_create_github_pr",
+        lambda **kwargs: captured_pr.update(kwargs) or "https://github.com/test/repo/pull/42",
     )
 
     await main_module.run_pr_create(
@@ -1927,9 +1878,11 @@ async def test_run_pr_create_derives_title_when_missing(monkeypatch, tmp_path) -
         body="Explicit Body",
     )
 
-    assert "Derive a clear pull request title" in captured["prompt"]
-    assert "Use this exact pull request body" in captured["prompt"]
-    assert "Explicit Body" in captured["prompt"]
+    assert "Derive a clear pull request title" in captured_anvil["prompt"]
+    assert "Use this exact pull request body" in captured_anvil["prompt"]
+    assert "Explicit Body" in captured_anvil["prompt"]
+    assert captured_pr["title"] == "Generated title"
+    assert captured_pr["body"] == "Explicit Body"
 
 
 @pytest.mark.asyncio
@@ -1937,19 +1890,18 @@ async def test_run_pr_create_derives_title_body_and_uses_branches(
     monkeypatch, tmp_path, capsys
 ) -> None:
     """Verifies run_pr_create passes branch guidance to ACP."""
-    captured = _patch_headless_client(
-        monkeypatch,
-        events=[
-            {
-                "type": "NOTIFICATION",
-                "data": {
-                    "message": (
-                        "PR_CREATE: pull request created https://github.com/org/repo/pull/777"
-                    )
-                },
-            },
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
+    captured_anvil: dict[str, Any] = {}
+    captured_pr: dict[str, Any] = {}
+
+    async def fake_anvil_text(**kwargs: Any) -> str:
+        captured_anvil.update(kwargs)
+        return '{"title":"Generated title","body":"Generated body"}'
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+    monkeypatch.setattr(
+        main_module,
+        "_create_github_pr",
+        lambda **kwargs: captured_pr.update(kwargs) or "https://github.com/org/repo/pull/777",
     )
 
     await main_module.run_pr_create(
@@ -1960,31 +1912,28 @@ async def test_run_pr_create_derives_title_body_and_uses_branches(
         head_branch="feature-xyz",
     )
 
-    assert "env" not in captured["init_kwargs"]
-    assert "Use `main` as the base branch." in captured["prompt"]
-    assert "Use `feature-xyz` as the head branch." in captured["prompt"]
-    assert "Derive a clear pull request title" in captured["prompt"]
-    assert "Derive a useful Markdown pull request body" in captured["prompt"]
+    assert "Use `main` as the base branch." in captured_anvil["prompt"]
+    assert "Use `feature-xyz` as the head branch." in captured_anvil["prompt"]
+    assert "Derive a clear pull request title" in captured_anvil["prompt"]
+    assert "Derive a useful Markdown pull request body" in captured_anvil["prompt"]
+    assert captured_pr["base_branch"] == "main"
+    assert captured_pr["head_branch"] == "feature-xyz"
     assert "https://github.com/org/repo/pull/777" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
 async def test_run_pr_create_executor_error_exits_nonzero(monkeypatch, tmp_path, capsys) -> None:
     """Verifies run_pr_create exits non-zero on ACP error event."""
-    call_order: list[str] = []
-    _patch_headless_client(
-        monkeypatch,
-        call_order=call_order,
-        events=[
-            {"type": "ERROR", "data": {"message": "GitHub API error"}},
-            {"type": "STATE_CHANGE", "data": {"state": "FAILED"}},
-        ],
-    )
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        raise main_module.HeadlessAnvilError("GitHub API error")
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_pr_create(
             workspace_dir=tmp_path,
-            title="Test",
+            title=None,
             body="Test body",
         )
 
@@ -1992,7 +1941,6 @@ async def test_run_pr_create_executor_error_exits_nonzero(monkeypatch, tmp_path,
     captured = capsys.readouterr()
     assert "Anvil ACP error during PR create" in captured.err
     assert "GitHub API error" in captured.err
-    assert "stop" in call_order
 
 
 def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -2090,78 +2038,42 @@ def test_main_commit_uses_anvil_config_when_flags_omitted(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_run_commit_calls_lifecycle_in_order(monkeypatch, tmp_path) -> None:
-    """Verifies that run_commit follows the correct lifecycle order."""
-    call_order: list[str] = []
-    captured = _patch_headless_client(
-        monkeypatch,
-        call_order=call_order,
-        events=[
-            {
-                "type": "LLM_TOKEN",
-                "data": {"token": "COMMIT: committed abc1234567890 Test commit"},
-            },
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
-    )
+async def test_run_commit_with_explicit_message_commits_in_python(monkeypatch, tmp_path) -> None:
+    """Verifies that run_commit uses git directly when a message is provided."""
+    calls: list[tuple[str, ...]] = []
+    heads = iter(["abc0000", "def1111"])
 
-    await main_module.run_commit(
-        workspace_dir=tmp_path,
-        message="My commit message",
-        model="gpt-test",
-        reasoning_effort="medium",
-    )
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
 
-    assert "start" in call_order
-    assert "run_prompt" in call_order
-    assert "stop" in call_order
-    assert captured["init_kwargs"]["default_model"] == "gpt-test"
-    assert captured["model"] == "gpt-test"
-    assert captured["reasoning_effort"] == "medium"
-    assert "My commit message" in captured["prompt"]
-    assert "Use this exact commit message" in captured["prompt"]
+    await main_module.run_commit(workspace_dir=tmp_path, message="My commit message")
 
-    start_idx = call_order.index("start")
-    prompt_idx = call_order.index("run_prompt")
-    stop_idx = call_order.index("stop")
-
-    assert start_idx < prompt_idx
-    assert prompt_idx < stop_idx
+    assert ("add", "-A") in calls
+    assert ("commit", "-m", "My commit message") in calls
 
 
 @pytest.mark.asyncio
 async def test_run_commit_no_changes(monkeypatch, tmp_path, capsys) -> None:
     """Verifies that run_commit handles no changes case."""
-    call_order: list[str] = []
-    _patch_headless_client(
-        monkeypatch,
-        call_order=call_order,
-        events=[
-            {"type": "LLM_TOKEN", "data": {"token": "COMMIT: no changes"}},
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
-    )
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: "abc0000")
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: "")
 
     await main_module.run_commit(workspace_dir=tmp_path, message=None)
 
     captured = capsys.readouterr()
     assert "No uncommitted changes" in captured.out
-    assert "stop" in call_order
 
 
 @pytest.mark.asyncio
 async def test_run_commit_success_output(monkeypatch, tmp_path, capsys) -> None:
     """Verifies that run_commit prints commit info on success."""
-    _patch_headless_client(
-        monkeypatch,
-        events=[
-            {
-                "type": "NOTIFICATION",
-                "data": {"message": "COMMIT: committed abc1234567890 Fix parser bug"},
-            },
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
-    )
+    heads = iter(["abc0000", "abc1234567890"])
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: "")
 
     await main_module.run_commit(workspace_dir=tmp_path, message="Fix parser bug")
 
@@ -2171,47 +2083,63 @@ async def test_run_commit_success_output(monkeypatch, tmp_path, capsys) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_commit_without_marker_or_git_change_exits_nonzero(
+async def test_run_commit_uses_anvil_for_missing_message(monkeypatch, tmp_path) -> None:
+    """Verifies that run_commit asks Anvil only for commit message text."""
+    captured: dict[str, Any] = {}
+    heads = iter(["abc0000", "def1111"])
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: "")
+
+    async def fake_anvil_text(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "Generated commit message"
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+
+    await main_module.run_commit(workspace_dir=tmp_path, message=None, model="gpt-test")
+
+    assert captured["model"] == "gpt-test"
+    assert "derive one concise git commit" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_run_commit_without_git_head_change_exits_nonzero(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """Verifies that run_commit does not report success from protocol completion alone."""
-    _patch_headless_client(
-        monkeypatch,
-        events=[
-            {"type": "LLM_TOKEN", "data": {"token": "finished"}},
-            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
-        ],
-    )
+    """Verifies that run_commit validates that git actually created a commit."""
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: "abc0000")
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: "")
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_commit(workspace_dir=tmp_path, message="Fix parser bug")
 
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "without reporting or creating a commit" in captured.err
+    assert "git commit did not create a new commit" in captured.err
 
 
 @pytest.mark.asyncio
-async def test_run_commit_executor_error_exits_nonzero(monkeypatch, tmp_path, capsys) -> None:
-    """Verifies that run_commit exits non-zero on ACP error event."""
-    call_order: list[str] = []
-    _patch_headless_client(
-        monkeypatch,
-        call_order=call_order,
-        events=[
-            {"type": "ERROR", "data": {"message": "Git error"}},
-            {"type": "STATE_CHANGE", "data": {"state": "FAILED"}},
-        ],
-    )
+async def test_run_commit_anvil_error_exits_nonzero(monkeypatch, tmp_path, capsys) -> None:
+    """Verifies that run_commit exits non-zero when Anvil cannot draft a message."""
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: "abc0000")
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        raise main_module.HeadlessAnvilError("Git error")
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
     with pytest.raises(SystemExit) as exc:
-        await main_module.run_commit(workspace_dir=tmp_path, message="test")
+        await main_module.run_commit(workspace_dir=tmp_path, message=None)
 
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "Anvil ACP error during commit" in captured.err
     assert "Git error" in captured.err
-    assert "stop" in call_order
 
 
 def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -2601,11 +2529,24 @@ def test_infer_github_repo_from_remote_empty_stdout_returns_none(monkeypatch, tm
 
 @pytest.mark.asyncio
 async def test_run_pr_review_job_submits_anvil_prompt(monkeypatch, tmp_path) -> None:
-    call_order: list[str] = []
-    captured = _patch_headless_client(
-        monkeypatch,
-        call_order=call_order,
-        events=[{"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}],
+    captured_anvil: dict[str, Any] = {}
+    captured_review: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        main_module,
+        "_fetch_pr_review_context",
+        lambda **_kwargs: ("Title", "Body", "diff --git a/file.py b/file.py"),
+    )
+
+    async def fake_anvil_text(**kwargs: Any) -> str:
+        captured_anvil.update(kwargs)
+        return '{"summaryMarkdown":"## Brokk PR Review\\n\\nLooks good.","comments":[]}'
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+    monkeypatch.setattr(
+        main_module,
+        "_post_github_pr_review",
+        lambda **kwargs: captured_review.update(kwargs) or "",
     )
 
     await main_module.run_pr_review_job(
@@ -2617,27 +2558,30 @@ async def test_run_pr_review_job_submits_anvil_prompt(monkeypatch, tmp_path) -> 
         reasoning_effort="medium",
     )
 
-    assert "start" in call_order
-    assert "run_prompt" in call_order
-    assert "env" not in captured["init_kwargs"]
-    assert captured["init_kwargs"]["default_model"] == "gpt-4"
-    assert captured["model"] == "gpt-4"
-    assert captured["reasoning_effort"] == "medium"
-    assert "test-owner/test-repo" in captured["prompt"]
-    assert "pull request #42" in captured["prompt"].lower()
+    assert captured_anvil["model"] == "gpt-4"
+    assert captured_anvil["reasoning_effort"] == "medium"
+    assert "test-owner/test-repo" in captured_anvil["prompt"]
+    assert "pull request #42" in captured_anvil["prompt"].lower()
+    assert captured_review["repo_owner"] == "test-owner"
+    assert captured_review["repo_name"] == "test-repo"
+    assert captured_review["pr_number"] == 42
+    assert "## Brokk PR Review" in captured_review["body"]
 
 
 @pytest.mark.asyncio
 async def test_run_pr_review_job_exits_nonzero_on_failed_state(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    _patch_headless_client(
-        monkeypatch,
-        events=[
-            {"type": "ERROR", "data": {"message": "GitHub API error"}},
-            {"type": "STATE_CHANGE", "data": {"state": "FAILED"}},
-        ],
+    monkeypatch.setattr(
+        main_module,
+        "_fetch_pr_review_context",
+        lambda **_kwargs: ("Title", "Body", "diff --git a/file.py b/file.py"),
     )
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        raise main_module.HeadlessAnvilError("GitHub API error")
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_pr_review_job(
@@ -2650,7 +2594,8 @@ async def test_run_pr_review_job_exits_nonzero_on_failed_state(
 
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "PR review job ended with state FAILED" in captured.err
+    assert "Anvil ACP error during PR review job" in captured.err
+    assert "GitHub API error" in captured.err
 
 
 def test_install_only_writes_config(monkeypatch, tmp_path) -> None:

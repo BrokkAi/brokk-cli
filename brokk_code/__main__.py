@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -69,8 +71,45 @@ def _extract_pr_url(text: str) -> str:
     return match.group(0) if match else ""
 
 
+def _extract_issue_url(text: str) -> str:
+    match = re.search(r"https://github\.com/[^\s)]+/issues/\d+", text)
+    return match.group(0) if match else ""
+
+
 def _print_progress(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def _die(message: str) -> None:
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(raw[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("Anvil response did not contain a valid JSON object")
+
+
+def _json_string_field(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Anvil JSON response is missing required string field: {key}")
+    return value.strip()
 
 
 def _git_output(workspace_dir: Path, *args: str) -> str | None:
@@ -93,6 +132,88 @@ def _git_head(workspace_dir: Path) -> str | None:
 
 def _git_status_porcelain(workspace_dir: Path) -> str | None:
     return _git_output(workspace_dir, "status", "--porcelain")
+
+
+def _run_git(workspace_dir: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_dir), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or str(exc)
+        _die(f"git {' '.join(args)} failed: {detail}")
+    except OSError as exc:
+        _die(f"git {' '.join(args)} failed: {exc}")
+    return result.stdout.strip()
+
+
+def _run_gh(args: list[str], *, cwd: Path | None = None, action_label: str) -> str:
+    try:
+        result = subprocess.run(
+            ["gh", *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or str(exc)
+        _die(f"{action_label} failed: {detail}")
+    except OSError as exc:
+        _die(f"{action_label} failed: {exc}")
+    return result.stdout.strip()
+
+
+async def _run_anvil_text_prompt(
+    *,
+    workspace_dir: Path,
+    prompt: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    anvil_binary: Path | None,
+    anvil_version: str,
+    progress_label: str,
+) -> str:
+    manager = HeadlessAcpClient(
+        workspace_dir=workspace_dir,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        default_model=model,
+    )
+    try:
+        _print_progress(f"Starting Anvil for {progress_label}...")
+        await manager.start()
+        transcript: list[str] = []
+        last_error: str | None = None
+        last_state: str | None = None
+        _print_progress(f"Submitting {progress_label} prompt to Anvil...")
+        async for event in manager.run_prompt(
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
+            text = _extract_event_text(event)
+            if text:
+                transcript.append(text)
+            event_type = event.get("type")
+            data = safe_data(event)
+            if event_type == "ERROR":
+                last_error = text or "unknown error"
+            elif event_type == "STATE_CHANGE":
+                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
+
+        if last_error or (last_state and is_failure_state(last_state)):
+            detail = f": {last_error}" if last_error else ""
+            raise HeadlessAnvilError(f"{progress_label} failed{detail}")
+        return "\n".join(transcript).strip()
+    finally:
+        await manager.stop()
 
 
 def _resolve_neovim_plugin(*, plugin: str | None) -> str:
@@ -316,6 +437,13 @@ def _run_issue_command(
         repo_name=args.repo_name,
         action_label=action_label,
     ) as issue_workspace_path:
+        if include_issue_number and mode in {"ISSUE_DIAGNOSE", "ISSUE"}:
+            tags["issue_context"] = _fetch_github_issue_context(
+                repo_owner=args.repo_owner,
+                repo_name=args.repo_name,
+                issue_number=args.issue_number,
+                cwd=issue_workspace_path,
+            )
         asyncio.run(
             run_headless_job(
                 workspace_dir=issue_workspace_path,
@@ -397,6 +525,11 @@ def _ensure_gh_available(*, action_label: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    if any(
+        os.environ.get(key)
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    ):
+        return
     try:
         subprocess.run(
             ["gh", "auth", "status"],
@@ -415,6 +548,229 @@ def _ensure_gh_available(*, action_label: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def _github_repo_slug(repo_owner: str, repo_name: str) -> str:
+    return f"{repo_owner}/{repo_name}"
+
+
+def _create_github_issue(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    title: str,
+    body: str,
+    cwd: Path | None = None,
+) -> str:
+    _ensure_gh_available(action_label="Issue create")
+    output = _run_gh(
+        [
+            "issue",
+            "create",
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--title",
+            title,
+            "--body",
+            body,
+        ],
+        cwd=cwd,
+        action_label="issue create",
+    )
+    issue_url = _extract_issue_url(output)
+    if not issue_url:
+        _die("issue create did not return a GitHub issue URL")
+    return issue_url
+
+
+def _post_github_issue_comment(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    body: str,
+    cwd: Path | None = None,
+) -> str:
+    _ensure_gh_available(action_label="Issue comment")
+    return _run_gh(
+        [
+            "issue",
+            "comment",
+            str(issue_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--body",
+            body,
+        ],
+        cwd=cwd,
+        action_label="issue comment",
+    )
+
+
+def _fetch_github_issue_context(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    cwd: Path | None = None,
+) -> str:
+    _ensure_gh_available(action_label="Issue fetch")
+    output = _run_gh(
+        [
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--comments",
+            "--json",
+            "title,body,comments,url",
+        ],
+        cwd=cwd,
+        action_label="issue fetch",
+    )
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return output
+    title = data.get("title") if isinstance(data.get("title"), str) else ""
+    body = data.get("body") if isinstance(data.get("body"), str) else ""
+    url = data.get("url") if isinstance(data.get("url"), str) else ""
+    out = [
+        f"# GitHub Issue #{issue_number}: {title}",
+        "",
+        f"URL: {url}",
+        "",
+        "## Description",
+        "",
+        body,
+    ]
+    comments = data.get("comments")
+    if isinstance(comments, list) and comments:
+        out.extend(["", "## Comments", ""])
+        for comment in comments[-50:]:
+            if not isinstance(comment, dict):
+                continue
+            author = comment.get("author")
+            login = author.get("login") if isinstance(author, dict) else "unknown"
+            created = comment.get("createdAt", "unknown time")
+            comment_body = comment.get("body", "")
+            out.append(f"@{login} ({created}):")
+            out.append(str(comment_body))
+            out.append("")
+    return "\n".join(out).strip()
+
+
+def _create_github_pr(
+    *,
+    title: str,
+    body: str,
+    base_branch: str | None,
+    head_branch: str | None,
+    cwd: Path,
+) -> str:
+    _ensure_gh_available(action_label="PR create")
+    args = ["pr", "create", "--title", title, "--body", body]
+    if base_branch:
+        args.extend(["--base", base_branch])
+    if head_branch:
+        args.extend(["--head", head_branch])
+    output = _run_gh(args, cwd=cwd, action_label="PR create")
+    pr_url = _extract_pr_url(output)
+    if not pr_url:
+        _die("PR create did not return a GitHub pull request URL")
+    return pr_url
+
+
+def _fetch_pr_review_context(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    cwd: Path,
+) -> tuple[str, str, str]:
+    _ensure_gh_available(action_label="PR review")
+    repo_slug = _github_repo_slug(repo_owner, repo_name)
+    metadata_output = _run_gh(
+        [
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            repo_slug,
+            "--json",
+            "title,body",
+        ],
+        cwd=cwd,
+        action_label="PR metadata fetch",
+    )
+    try:
+        metadata = json.loads(metadata_output)
+    except json.JSONDecodeError:
+        metadata = {}
+    title = metadata.get("title") if isinstance(metadata.get("title"), str) else ""
+    body = metadata.get("body") if isinstance(metadata.get("body"), str) else ""
+    diff = _run_gh(
+        ["pr", "diff", str(pr_number), "--repo", repo_slug, "--patch"],
+        cwd=cwd,
+        action_label="PR diff fetch",
+    )
+    return title, body, diff
+
+
+def _format_pr_review_body(review: dict[str, Any], *, severity_threshold: str | None) -> str:
+    summary = _json_string_field(review, "summaryMarkdown")
+    comments = review.get("comments", [])
+    if not isinstance(comments, list):
+        raise ValueError("Anvil PR review JSON field comments must be an array")
+    findings: list[str] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        path = str(comment.get("path") or "").strip()
+        line = comment.get("line")
+        severity = str(comment.get("severity") or "LOW").strip().upper()
+        body = str(comment.get("bodyMarkdown") or "").strip()
+        if not body:
+            continue
+        location = (
+            f"`{path}:{line}`" if path and isinstance(line, int) else (f"`{path}`" if path else "")
+        )
+        prefix = f"- **{severity}**"
+        if location:
+            prefix += f" at {location}"
+        findings.append(f"{prefix}: {body}")
+    if findings:
+        return summary.rstrip() + "\n\n### Findings\n\n" + "\n".join(findings)
+    threshold = severity_threshold or "HIGH"
+    return (
+        summary.rstrip() + f"\n\nNo findings met the configured severity threshold ({threshold})."
+    )
+
+
+def _post_github_pr_review(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    body: str,
+    cwd: Path,
+) -> str:
+    _ensure_gh_available(action_label="PR review")
+    return _run_gh(
+        [
+            "pr",
+            "review",
+            str(pr_number),
+            "--repo",
+            _github_repo_slug(repo_owner, repo_name),
+            "--comment",
+            "--body",
+            body,
+        ],
+        cwd=cwd,
+        action_label="PR review post",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -723,91 +1079,83 @@ async def run_commit(
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Commits current changes via Anvil ACP."""
-    manager = HeadlessAcpClient(
-        workspace_dir=workspace_dir,
-        anvil_binary=anvil_binary,
-        anvil_version=anvil_version,
-        default_model=model,
-    )
-
+    """Commits current changes with a message generated by Anvil ACP."""
     try:
         initial_head = _git_head(workspace_dir)
-        _print_progress("Starting Anvil for commit...")
-        await manager.start()
-        transcript: list[str] = []
-        last_error: str | None = None
-        last_state: str | None = None
-        prompt = build_commit_prompt(message=message)
-        _print_progress("Submitting commit task to Anvil...")
-        async for event in manager.run_prompt(
-            prompt,
-            model=model,
-            reasoning_effort=reasoning_effort,
-        ):
-            event_type = event.get("type")
-            data = safe_data(event)
-            text = _extract_event_text(event)
-            if text:
-                transcript.append(text)
-            if event_type == "ERROR":
-                last_error = text or "unknown error"
-            elif event_type == "STATE_CHANGE":
-                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
+        status = _git_status_porcelain(workspace_dir)
+        if status is None:
+            _die("unable to inspect git status for commit")
+        if not status:
+            print("No uncommitted changes.")
+            return
 
-        output = "\n".join(transcript)
-        if last_error or (last_state and is_failure_state(last_state)):
-            detail = f": {last_error}" if last_error else ""
-            print(f"Anvil ACP error during commit{detail}", file=sys.stderr)
-            sys.exit(1)
+        commit_message = (message or "").strip()
+        if not commit_message:
+            commit_message = await _run_anvil_text_prompt(
+                workspace_dir=workspace_dir,
+                prompt=build_commit_prompt(message=None),
+                model=model,
+                reasoning_effort=reasoning_effort,
+                anvil_binary=anvil_binary,
+                anvil_version=anvil_version,
+                progress_label="commit message",
+            )
+        if not commit_message:
+            _die("Anvil did not return a commit message")
+
+        _run_git(workspace_dir, "add", "-A")
+        staged = _git_output(workspace_dir, "diff", "--cached", "--name-only")
+        if not staged:
+            _die("no staged changes remain after git add")
+        _run_git(workspace_dir, "commit", "-m", commit_message)
 
         current_head = _git_head(workspace_dir)
-        current_status = _git_status_porcelain(workspace_dir)
-
-        if re.search(r"COMMIT:\s*no changes", output, re.IGNORECASE):
-            if current_status:
-                print(
-                    "Anvil reported no changes, but the working tree still has "
-                    "uncommitted changes.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            print("No uncommitted changes.")
-        else:
-            match = re.search(
-                r"COMMIT:\s*committed\s+([0-9a-fA-F]{7,40})(?:\s+([^\r\n]+))?",
-                output,
-                re.IGNORECASE,
-            )
-            if match:
-                commit_id = match.group(1)
-                first_line = (match.group(2) or "").strip()
-                if current_head and not current_head.startswith(commit_id):
-                    print(
-                        "Anvil reported a commit, but git HEAD does not match the reported commit.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                short_id = commit_id[:7]
-                suffix = f": {first_line}" if first_line else ""
-                print(f"Committed {short_id}{suffix}")
-            elif initial_head and current_head and current_head != initial_head:
-                print(f"Committed {current_head[:7]}")
-            else:
-                print(
-                    "Anvil completed the commit task without reporting or creating a commit.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        if not current_head or current_head == initial_head:
+            _die("git commit did not create a new commit")
+        print(f"Committed {current_head[:7]}: {commit_message.splitlines()[0]}")
 
     except HeadlessAnvilError as e:
         print(f"Anvil ACP error during commit: {e}", file=sys.stderr)
         sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"Unexpected error: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        await manager.stop()
+
+
+async def _derive_pr_create_text(
+    *,
+    workspace_dir: Path,
+    title: str | None,
+    body: str | None,
+    base_branch: str | None,
+    head_branch: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    anvil_binary: Path | None,
+    anvil_version: str,
+) -> tuple[str, str]:
+    if title and title.strip() and body and body.strip():
+        return title.strip(), body.strip()
+    text = await _run_anvil_text_prompt(
+        workspace_dir=workspace_dir,
+        prompt=build_pr_create_prompt(
+            title=title,
+            body=body,
+            base_branch=base_branch,
+            head_branch=head_branch,
+        ),
+        model=model,
+        reasoning_effort=reasoning_effort,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        progress_label="PR description",
+    )
+    data = _extract_json_object(text)
+    final_title = title.strip() if title and title.strip() else _json_string_field(data, "title")
+    final_body = body.strip() if body and body.strip() else _json_string_field(data, "body")
+    return final_title, final_body
 
 
 async def run_pr_create(
@@ -821,62 +1169,39 @@ async def run_pr_create(
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Creates a pull request via Anvil ACP."""
-    manager = HeadlessAcpClient(
-        workspace_dir=workspace_dir,
-        anvil_binary=anvil_binary,
-        anvil_version=anvil_version,
-        default_model=model,
-    )
-
+    """Creates a pull request, using Anvil ACP only to draft missing text."""
     try:
-        _print_progress("Starting Anvil for PR create...")
-        await manager.start()
-        transcript: list[str] = []
-        last_error: str | None = None
-        last_state: str | None = None
-        prompt = build_pr_create_prompt(
+        pr_title, pr_body = await _derive_pr_create_text(
+            workspace_dir=workspace_dir,
             title=title,
             body=body,
             base_branch=base_branch,
             head_branch=head_branch,
-        )
-        _print_progress("Submitting PR create task to Anvil...")
-        async for event in manager.run_prompt(
-            prompt,
             model=model,
             reasoning_effort=reasoning_effort,
-        ):
-            event_type = event.get("type")
-            data = safe_data(event)
-            text = _extract_event_text(event)
-            if text:
-                transcript.append(text)
-            if event_type == "ERROR":
-                last_error = text or "unknown error"
-            elif event_type == "STATE_CHANGE":
-                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
-
-        if last_error or (last_state and is_failure_state(last_state)):
-            detail = f": {last_error}" if last_error else ""
-            print(f"Anvil ACP error during PR create{detail}", file=sys.stderr)
-            sys.exit(1)
-
-        output = "\n".join(transcript)
-        pr_url = _extract_pr_url(output)
-        if pr_url:
-            print(f"Pull request created: {pr_url}")
-        else:
-            print("Pull request created.")
+            anvil_binary=anvil_binary,
+            anvil_version=anvil_version,
+        )
+        pr_url = _create_github_pr(
+            title=pr_title,
+            body=pr_body,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            cwd=workspace_dir,
+        )
+        print(f"Pull request created: {pr_url}")
 
     except HeadlessAnvilError as e:
         print(f"Anvil ACP error during PR create: {e}", file=sys.stderr)
         sys.exit(1)
+    except ValueError as e:
+        print(f"Anvil ACP error during PR create: {e}", file=sys.stderr)
+        sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"Unexpected error: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        await manager.stop()
 
 
 async def run_pr_review_job(
@@ -891,167 +1216,55 @@ async def run_pr_review_job(
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Runs a PR review job via Anvil ACP and streams events to stdout."""
-    manager = HeadlessAcpClient(
-        workspace_dir=workspace_dir,
-        anvil_binary=anvil_binary,
-        anvil_version=anvil_version,
-        default_model=model,
-    )
-
-    stage = "initializing"
-    job_id: str | None = None
-    last_state: str | None = None
-    error_messages: list[str] = []
-    spinner_index = 0
-    spinner_active = False
-    spinner_label = f"Reviewing PR #{pr_number}"
-    spinner_frames = "|/-\\"
-    spinner_enabled = sys.stdout.isatty() and not verbose
-
-    def _extract_message(event: dict[str, Any]) -> str:
-        raw = event.get("data")
-        if isinstance(raw, str):
-            return raw.strip()
-        data = safe_data(event)
-        for key in ("message", "text", "detail", "error"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        for key in ("message", "text", "detail", "error"):
-            value = event.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
-
-    def _render_spinner() -> None:
-        nonlocal spinner_index, spinner_active
-        if not spinner_enabled:
-            return
-        frame = spinner_frames[spinner_index % len(spinner_frames)]
-        spinner_index += 1
-        sys.stdout.write(f"\r{spinner_label}... {frame}")
-        sys.stdout.flush()
-        spinner_active = True
-
-    def _clear_spinner() -> None:
-        nonlocal spinner_active
-        if not spinner_enabled or not spinner_active:
-            return
-        width = len(spinner_label) + 20
-        sys.stdout.write("\r" + (" " * width) + "\r")
-        sys.stdout.flush()
-        spinner_active = False
-
-    def _update_shutdown_context() -> None:
-        context_parts = ["mode=REVIEW", f"stage={stage}"]
-        if job_id:
-            context_parts.append(f"job_id={job_id}")
-        if last_state:
-            context_parts.append(f"last_state={last_state}")
-        if error_messages:
-            context_parts.append(f"last_error={error_messages[-1]}")
-        manager.shutdown_context = ", ".join(context_parts)
-
+    """Generate a PR review with Anvil ACP and post it with gh."""
     try:
-        stage = "starting Anvil"
-        _update_shutdown_context()
-        _print_progress(f"Starting Anvil for PR review #{pr_number}...")
-        await manager.start()
-
-        stage = "submitting prompt"
-        _update_shutdown_context()
-        _render_spinner()
-        job_id = f"acp-{uuid.uuid4()}"
-        prompt = build_pr_review_prompt(
-            owner=repo_owner,
-            repo=repo_name,
+        pr_title, pr_body, pr_diff = _fetch_pr_review_context(
+            repo_owner=repo_owner,
+            repo_name=repo_name,
             pr_number=pr_number,
-            severity_threshold=severity_threshold,
+            cwd=workspace_dir,
         )
-        _update_shutdown_context()
-
-        stage = "streaming ACP events"
-        _update_shutdown_context()
-        _print_progress(f"Submitting PR review #{pr_number} task to Anvil...")
-        async for event in manager.run_prompt(
-            prompt,
+        review_text = await _run_anvil_text_prompt(
+            workspace_dir=workspace_dir,
+            prompt=build_pr_review_prompt(
+                owner=repo_owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                diff=pr_diff,
+                pr_title=pr_title,
+                pr_description=pr_body,
+                severity_threshold=severity_threshold,
+            ),
             model=model,
             reasoning_effort=reasoning_effort,
-        ):
-            _render_spinner()
-            event_type = event.get("type")
-            data = safe_data(event)
-            if event_type == "NOTIFICATION":
-                message = _extract_message(event)
-                if not message:
-                    continue
-                level = str(data.get("level", event.get("level", "INFO"))).strip().upper()
-                if not verbose and level not in {"WARN", "WARNING", "ERROR"}:
-                    continue
-                _clear_spinner()
-                print(f"[{level}] {message}")
-            elif event_type == "STATE_CHANGE":
-                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
-                _update_shutdown_context()
-                if verbose:
-                    _clear_spinner()
-                    print(f"Job state: {last_state}")
-            elif event_type in {"TOKEN", "LLM_TOKEN"}:
-                text = str(data.get("token", event.get("text", "")))
-                if verbose and text:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-                continue
-            elif event_type == "ERROR":
-                message = _extract_message(event) or "Unknown error event"
-                error_messages.append(message)
-                _update_shutdown_context()
-                _clear_spinner()
-                print(f"\nError event: {message}", file=sys.stderr)
-            elif event_type == "COMMAND_RESULT":
-                if verbose:
-                    _clear_spinner()
-                    print(f"[COMMAND_RESULT] {data}")
-            elif event_type == "TOOL_OUTPUT":
-                if verbose:
-                    _clear_spinner()
-                    print(f"[TOOL_OUTPUT] {data}")
-
-        if is_failure_state(last_state or ""):
-            _clear_spinner()
-            detail = f" Last error: {error_messages[-1]}" if error_messages else ""
-            print(
-                f"\nPR review job ended with state {last_state}.{detail}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        if error_messages and last_state != "COMPLETED":
-            _clear_spinner()
-            detail = f" Last error: {error_messages[-1]}"
-            observed_state = last_state or "UNKNOWN"
-            msg = f"\nPR review job ended with errors (last observed state: {observed_state})."
-            print(f"{msg}{detail}", file=sys.stderr)
-            sys.exit(1)
-
-        _clear_spinner()
-        print(f"PR #{pr_number} review complete.")
+            anvil_binary=anvil_binary,
+            anvil_version=anvil_version,
+            progress_label=f"PR review #{pr_number}",
+        )
+        review = _extract_json_object(review_text)
+        review_body = _format_pr_review_body(review, severity_threshold=severity_threshold)
+        _post_github_pr_review(
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            pr_number=pr_number,
+            body=review_body,
+            cwd=workspace_dir,
+        )
+        if verbose:
+            print(review_body)
+        print(f"PR #{pr_number} review posted.")
 
     except HeadlessAnvilError as e:
-        _clear_spinner()
-        _update_shutdown_context()
-        print(f"Anvil ACP error during PR review job ({stage}): {e}", file=sys.stderr)
+        print(f"Anvil ACP error during PR review job: {e}", file=sys.stderr)
         sys.exit(1)
+    except ValueError as e:
+        print(f"Anvil ACP error during PR review job: {e}", file=sys.stderr)
+        sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
-        _clear_spinner()
-        _update_shutdown_context()
-        print(f"Unexpected error during PR review job ({stage}): {e}", file=sys.stderr)
+        print(f"Unexpected error during PR review job: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        _clear_spinner()
-        _update_shutdown_context()
-        await manager.stop()
 
 
 async def run_headless_job(
@@ -1081,6 +1294,7 @@ async def run_headless_job(
     error_messages: list[str] = []
     created_issue_url: str | None = None
     token_url_scan_buffer = ""
+    transcript: list[str] = []
     spinner_index = 0
     spinner_active = False
     spinner_label = "Creating issue"
@@ -1200,6 +1414,7 @@ async def run_headless_job(
                 message = _extract_message(event)
                 if not message:
                     continue
+                transcript.append(message)
                 _record_issue_url_from_issue_writer_notification(message)
                 _record_issue_url(message)
                 level = str(data.get("level", event.get("level", "INFO"))).strip().upper()
@@ -1220,6 +1435,8 @@ async def run_headless_job(
                     print(f"Job state: {last_state}")
             elif event_type in {"TOKEN", "LLM_TOKEN"}:
                 text = str(data.get("token", event.get("text", "")))
+                if text:
+                    transcript.append(text)
                 _record_issue_url(text)
                 # LITE_AGENT always streams tokens; other modes only when verbose.
                 if (verbose or mode == "LITE_AGENT") and text:
@@ -1242,6 +1459,9 @@ async def run_headless_job(
                 if verbose:
                     _clear_spinner()
                     print(f"[COMMAND_RESULT] {data}")
+                command_text = str(data.get("output", "")) or str(data.get("resultText", ""))
+                if command_text:
+                    transcript.append(command_text)
                 _record_issue_url(str(data.get("output", "")))
                 _record_issue_url(str(data.get("resultText", "")))
                 _record_issue_url(str(data.get("command", "")))
@@ -1250,6 +1470,9 @@ async def run_headless_job(
                 if verbose:
                     _clear_spinner()
                     print(f"[TOOL_OUTPUT] {data}")
+                tool_text = str(data.get("text", "")) or str(data.get("resultText", ""))
+                if tool_text:
+                    transcript.append(tool_text)
                 _record_issue_url(str(data.get("output", "")))
                 _record_issue_url(str(data.get("text", "")))
                 _record_issue_url(str(data.get("resultText", "")))
@@ -1275,10 +1498,51 @@ async def run_headless_job(
 
         _clear_spinner()
         if mode == "ISSUE_WRITER":
-            if created_issue_url:
-                print(f"Issue created: {created_issue_url}")
-            else:
-                print("Issue created.")
+            try:
+                draft = _extract_json_object("\n".join(transcript))
+                issue_url = _create_github_issue(
+                    repo_owner=tags["repo_owner"],
+                    repo_name=tags["repo_name"],
+                    title=_json_string_field(draft, "title"),
+                    body=_json_string_field(draft, "body"),
+                    cwd=workspace_dir,
+                )
+            except ValueError as e:
+                print(f"Anvil ACP error during {mode} job: {e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Issue created: {issue_url}")
+        elif mode == "ISSUE_DIAGNOSE":
+            diagnosis = "\n".join(transcript).strip()
+            if not diagnosis:
+                print(f"Anvil ACP error during {mode} job: empty diagnosis", file=sys.stderr)
+                sys.exit(1)
+            issue_number = int(tags["issue_number"])
+            timestamp = datetime.now(UTC).isoformat()
+            solve_command = (
+                f"brokk issue solve --issue-number {issue_number} "
+                f"--repo-owner {tags['repo_owner']} --repo-name {tags['repo_name']}"
+            )
+            comment_body = f"""
+<!-- brokk:diagnosis:v1 timestamp="{timestamp}" -->
+
+## Issue Analysis
+
+{diagnosis}
+
+---
+
+**Next steps:** To fix this issue, run:
+
+`{solve_command}`
+""".strip()
+            _post_github_issue_comment(
+                repo_owner=tags["repo_owner"],
+                repo_name=tags["repo_name"],
+                issue_number=issue_number,
+                body=comment_body,
+                cwd=workspace_dir,
+            )
+            print(f"Diagnosis posted to issue #{issue_number}.")
         else:
             print("Job finished.")
 
