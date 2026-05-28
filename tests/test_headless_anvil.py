@@ -71,6 +71,31 @@ def test_build_issue_diagnose_prompt_requests_inner_body_only() -> None:
     assert "<!-- brokk:diagnosis:v1" not in prompt
 
 
+def test_build_issue_solve_prompt_uses_prefetched_context_without_github_side_effects() -> None:
+    prompt = build_headless_prompt(
+        task_input="ignored",
+        mode="ISSUE",
+        tags={
+            "repo_owner": "acme",
+            "repo_name": "service",
+            "issue_number": "123",
+            "issue_context": "Issue title and comments",
+        },
+        skip_verification=False,
+        max_issue_fix_attempts=2,
+    )
+
+    assert "Resolve GitHub Issue #123 in acme/service" in prompt
+    assert "Issue title and comments" in prompt
+    assert "Run focused verification after making changes" in prompt
+    assert "Use at most 2 verification fix attempt(s)" in prompt
+    assert (
+        "Do not create branches, commit, push, open pull requests, or run GitHub commands" in prompt
+    )
+    assert "Fetch the issue title" not in prompt
+    assert "Use the repository's GitHub tooling/authentication" not in prompt
+
+
 def test_build_pr_review_prompt_includes_threshold() -> None:
     prompt = build_pr_review_prompt(
         owner="acme",
