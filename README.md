@@ -1,131 +1,135 @@
 # Brokk Code
 
-## What this project is for
+Python CLI tooling for Brokk editor integrations, ACP/MCP servers, and
+Anvil-backed repository automation.
 
-This project is a Python CLI for Brokk editor integrations and non-interactive automation. It launches [Anvil](https://github.com/BrokkAi/anvil) over ACP for agent workflows and [Bifrost](https://github.com/BrokkAi/bifrost) over MCP for code-intelligence tools.
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.11+
-
-### Installation
-
-**Using uv (recommended):**
+The published command is `brokk`. For normal use, run it through `uvx` so the
+latest published package is resolved automatically:
 
 ```bash
-cd brokk-code
-uv sync
+uvx brokk --help
 ```
 
-**Using pip:**
+Local development still uses `uv run`; see [Development](#development).
+
+## Requirements
+
+- `uv`/`uvx` for normal user-facing commands and generated editor configs.
+- Python 3.11+ for local development.
+- `gh` authenticated for GitHub issue and pull-request automation.
+- `curl` on Unix-like systems if Brokk needs to bootstrap `uv`.
+
+ACP mode launches Anvil and does not use the Java executor. MCP mode launches
+Bifrost and does not use the Java executor.
+
+## Quick Start
+
+Show the available commands:
 
 ```bash
-cd brokk-code
-pip install -e .
+uvx brokk --help
 ```
 
-### Running
-
-**With uv:**
+Install an editor integration:
 
 ```bash
-uv run brokk --help
+uvx brokk install zed
+uvx brokk install intellij
+uvx brokk install neovim --plugin codecompanion
+uvx brokk install neovim --plugin avante
 ```
 
-**With pip installation:**
+Install MCP integration settings for Claude Code and Codex:
 
 ```bash
-brokk --help
+uvx brokk install mcp
 ```
 
-**Or run directly:**
+Install the local Codex plugin entry:
 
 ```bash
-python -m brokk_code
+uvx brokk install codex-plugin
 ```
 
-Running `brokk` without a subcommand prints the help menu.
+Installers write client configuration only. They do not configure GitHub auth,
+do not require a Brokk API key, and do not warm Anvil or Bifrost runtime
+dependencies. Where supported, generated config launches Brokk as
+`uvx brokk ...` so clients resolve the current package at runtime.
 
-### ACP Mode
+Use `--force` to replace an existing generated integration entry when the
+installer supports it.
 
-Run the [Anvil](https://github.com/BrokkAi/anvil) ACP server mode over stdio:
+## ACP Server
+
+Run Anvil as an ACP server over stdio:
 
 ```bash
-uv run brokk acp
+uvx brokk acp --workspace .
 ```
 
-This mode is headless and intended for ACP-compatible clients. On first use
-brokk-code resolves Anvil in this order: `--anvil-binary` override > `anvil`
-on `$PATH` > a downloaded release pinned to the bundled Anvil version.
+Resolution order for Anvil is:
 
-Headless task commands (`brokk exec`, `brokk commit`, `brokk pr create`,
-`brokk pr review`, and `brokk issue ...`) also run through Anvil ACP. The
-first interactive run opens Anvil scripting configuration; you can also run
-it any time with:
+1. `--anvil-binary <path>`
+2. `anvil` on `PATH`
+3. A downloaded release pinned to the bundled Anvil version
+
+Useful ACP options:
 
 ```bash
-uv run brokk anvil-config
+uvx brokk acp --workspace . --default-model gpt-5.2
+uvx brokk acp --workspace . --max-turns 20
+uvx brokk acp --workspace . --bifrost-binary /path/to/bifrost
 ```
 
-The configuration is stored as JSON in Brokk's platform config directory and
-can use one model/reasoning setting for every scripting command or separate
-settings per command. `--model <id>` and `--reasoning-effort <level>` remain
-available as one-off overrides.
+## MCP Server
 
-Use `brokk anvil-config --show` to inspect the saved JSON-backed settings, or
-`brokk anvil-config --reset` to remove them.
-
-### Bifrost MCP Mode
-
-Run the [bifrost](https://github.com/BrokkAi/bifrost) (Rust) MCP server over stdio:
+Run Bifrost as an MCP server over stdio:
 
 ```bash
-uv run brokk mcp --workspace .
+uvx brokk mcp --workspace .
 ```
 
-On first use brokk-code resolves the binary in this order: `--bifrost-binary` override > `bifrost` on `$PATH` > a downloaded release pinned to `BUNDLED_BIFROST_VERSION` (cached under the platform cache dir, e.g. `~/Library/Caches/Brokk/bifrost/<version>/` on macOS). Bifrost ships native binaries for arm64 macOS, x86_64/aarch64 Linux, and x86_64/aarch64 Windows; Intel macOS is not supported by upstream.
+Resolution order for Bifrost is:
 
-### Editor Integration Installers
+1. `--bifrost-binary <path>`
+2. `bifrost` on `PATH`
+3. A downloaded release pinned to the bundled Bifrost version
 
-You can generate integration settings for supported clients:
+Unknown `brokk mcp` arguments are passed through to Bifrost.
+
+## Editor Integrations
+
+### Zed and IntelliJ
 
 ```bash
-uv run brokk install zed
-uv run brokk install intellij
-uv run brokk install neovim --plugin codecompanion
-uv run brokk install neovim --plugin avante
+uvx brokk install zed
+uvx brokk install intellij
+uvx brokk install jetbrains
 ```
 
-Installers only write client configuration. ACP integrations launch `brokk acp`,
-and MCP integrations launch `brokk mcp`; they do not configure GitHub auth or a
-Brokk API key.
+These installers add a custom ACP agent server entry that launches:
 
-If you run `brokk install neovim` without `--plugin`, Brokk shows a menu in interactive terminals.
+```bash
+uvx brokk acp
+```
 
-#### Neovim + CodeCompanion
+`jetbrains` is an alias for `intellij`.
 
-`brokk install neovim --plugin codecompanion` creates a Brokk ACP adapter module at:
+### Neovim + CodeCompanion
 
-`~/.config/nvim/lua/brokk/brokk_codecompanion.lua`
+```bash
+uvx brokk install neovim --plugin codecompanion
+```
 
-What is CodeCompanion?
-- `codecompanion.nvim` is a Neovim plugin for AI chat, code assistance, and agent workflows.
-- It can connect to ACP-compatible agent servers.
-- Brokk provides one of those agent servers via `brokk acp`.
+This writes:
 
-What this installer does:
-- Writes a small adapter module that tells CodeCompanion to start and talk to Brokk over ACP.
-- Keeps this Brokk-specific config in a clearly named module (`brokk.brokk_codecompanion`).
-- Attempts a conservative auto-wire of `~/.config/nvim/init.lua` when it can safely patch a simple `opts = {}` plugin spec.
-- Does **not** install Neovim plugins by itself.
+```text
+~/.config/nvim/lua/brokk/brokk_codecompanion.lua
+```
 
-1. Install CodeCompanion:
-   - GitHub: <https://github.com/olimorris/codecompanion.nvim>
-   - Docs: <https://codecompanion.olimorris.dev/>
-2. Ensure Brokk is available on your shell `PATH` as `brokk` (or edit the generated file command).
-3. Wire the generated Brokk module into your CodeCompanion plugin setup:
+It creates a CodeCompanion ACP adapter named `brokk`. The installer may patch a
+simple `init.lua` plugin spec when it can do so conservatively; otherwise load
+the module from your CodeCompanion setup:
 
 ```lua
 {
@@ -136,25 +140,22 @@ What this installer does:
 }
 ```
 
-The generated module sets `interactions.chat.adapter = "brokk"` so Brokk becomes the default for CodeCompanion chat.
+The generated module sets Brokk as the default chat adapter. If CodeCompanion
+still reports its default Copilot adapter, the Brokk module is not loaded yet.
 
-If you see `Copilot Adapter: No token found`, CodeCompanion is still using its default adapter and the Brokk module is not loaded yet.
+### Neovim + Avante
 
-#### Neovim + Avante
+```bash
+uvx brokk install neovim --plugin avante
+```
 
-`brokk install neovim --plugin avante` creates a Brokk Avante provider module at:
+This writes:
 
-`~/.config/nvim/lua/brokk/brokk_avante.lua`
+```text
+~/.config/nvim/lua/brokk/brokk_avante.lua
+```
 
-What is Avante?
-- `avante.nvim` is a Neovim AI assistant plugin that supports ACP providers.
-- Brokk can be configured as an ACP provider via `brokk acp`.
-- Installer behavior is the same: write Brokk module first, then only auto-patch `init.lua` when safe.
-
-1. Install Avante:
-   - GitHub: <https://github.com/yetone/avante.nvim>
-2. Ensure Brokk is available on your shell `PATH` as `brokk` (or edit the generated file command).
-3. Load the generated Brokk provider in your Avante config:
+Load the generated provider in your Avante config:
 
 ```lua
 local brokk = require("brokk.brokk_avante")
@@ -164,39 +165,134 @@ require("avante").setup(vim.tbl_deep_extend("force", brokk, {
 }))
 ```
 
-### Options
-
-- `--workspace <path>`: Specify the workspace directory (defaults to current directory).
-- `brokk acp --anvil-binary <path>`: Specify a custom Anvil binary for ACP mode.
-- `brokk acp --anvil-version <version>`: Specify the pinned Anvil version to resolve/download.
-- `brokk mcp --bifrost-binary <path>`: Specify a custom Bifrost binary for MCP mode.
-
-### Issue Management (GitHub)
-
-The Python CLI supports creating GitHub issues based on repository evidence via the `issue create` command. This is a read-only operation for the local repository; it uses the GitHub API to post a new issue.
+### Claude Code and Codex MCP
 
 ```bash
-# Example: Create an issue for a discovered bug
-brokk issue create "Describe the NPE in AuthService" \
-  --repo-owner acme-corp \
-  --repo-name service-api
+uvx brokk install mcp
 ```
 
-**Required Arguments:**
-- `prompt`: A description of the problem or evidence to report.
-- `--repo-owner` / `--repo-name`: Target GitHub repository.
+This configures Brokk MCP entries for Claude Code and Codex and installs helper
+skills/instructions for workspace activation and summaries.
 
-GitHub authentication is handled by GitHub tooling such as `gh`; `brokk-cli`
+### Codex Plugin
+
+```bash
+uvx brokk install codex-plugin
+```
+
+This installs local Codex plugin files and adds a local marketplace entry. After
+running it, restart Codex, choose the local marketplace, and install Brokk.
+
+### Direct Rust ACP for Zed/IntelliJ
+
+For development or direct Rust ACP usage, Zed and IntelliJ can be wired to
+`brokk-acp` instead of `uvx brokk acp`:
+
+```bash
+uvx brokk install zed --rust --model gpt-5.2
+uvx brokk install intellij --rust --model gpt-5.2
+```
+
+In this mode `brokk-acp` and `bifrost` must already be installed and available
+on the editor's inherited `PATH`. Use `--brokk-acp-binary <path>` to write an
+explicit `brokk-acp` path.
+
+## Headless Repository Commands
+
+These commands run through Anvil ACP and are intended for non-interactive
+automation:
+
+```bash
+uvx brokk exec "Find the likely cause of the failing test"
+uvx brokk commit
+uvx brokk commit "Fix startup race"
+```
+
+Pull request commands:
+
+```bash
+uvx brokk pr create --title "Fix startup race" --body "See commits."
+uvx brokk pr review \
+  --pr-number 123 \
+  --repo-owner acme \
+  --repo-name service
+```
+
+GitHub issue commands:
+
+```bash
+uvx brokk issue create "Report the flaky checkout failure" \
+  --repo-owner acme \
+  --repo-name service
+
+uvx brokk issue diagnose \
+  --issue-number 123 \
+  --repo-owner acme \
+  --repo-name service
+
+uvx brokk issue solve \
+  --issue-number 123 \
+  --repo-owner acme \
+  --repo-name service
+```
+
+GitHub authentication is handled by GitHub tooling such as `gh`. `brokk-cli`
 does not accept or forward GitHub token flags.
 
-## For Contributors & LLMs
+### Anvil Scripting Configuration
 
-To avoid common mistakes when working on this subproject:
+The first interactive run of a headless repository command opens Anvil
+scripting configuration. You can also run it explicitly:
 
-- **Context**: `brokk` is the Python CLI that launches Anvil for ACP and Bifrost for MCP.
-- **Do**: Run all Python-related commands (pytest, ruff, uv) from within the `brokk-code/` directory.
-- **Don't**: Add Java executor/JBang launch paths back into this package.
-- **Tests**: Mock ACP/MCP subprocesses. Do not launch real Anvil, Bifrost, Ollama, or provider services in unit tests.
-- **Guidelines**: 
-    - See [AGENTS.md](AGENTS.md) for general Python contribution rules.
-    - See [brokk_code/AGENTS.md](brokk_code/AGENTS.md) for package-specific details.
+```bash
+uvx brokk anvil-config
+```
+
+Brokk starts Anvil, reads its ACP `configOptions`, and presents the real
+`model_selection` and `reasoning_effort` choices exposed by Anvil. The saved
+JSON configuration can use one model/reasoning setting for every scripting
+command or separate settings per command.
+
+Inspect or reset the saved configuration:
+
+```bash
+uvx brokk anvil-config --show
+uvx brokk anvil-config --reset
+```
+
+`--model <id>` and `--reasoning-effort <level>` remain available on headless
+commands as one-off overrides.
+
+Common runtime options:
+
+- `--workspace <path>`: workspace directory, defaulting to the current directory.
+- `--worktree`: run the command in an isolated git worktree when applicable.
+- `--anvil-binary <path>`: use a specific Anvil binary.
+- `--anvil-version <version>`: use a specific Anvil release version.
+
+## Development
+
+Clone the repo and create the managed environment:
+
+```bash
+uv sync
+```
+
+Run the CLI from the checkout:
+
+```bash
+uv run brokk --help
+uv run brokk version
+```
+
+Run tests and linting:
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+```
+
+When changing code, keep generated repository content in English and follow the
+project guidance in [AGENTS.md](AGENTS.md) and
+[brokk_code/AGENTS.md](brokk_code/AGENTS.md).
