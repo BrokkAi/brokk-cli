@@ -38,6 +38,7 @@ def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_pa
     assert captured["cwd"] == tmp_path.resolve()
     assert captured["binary"] == str(binary)
     assert captured["command"] == [str(binary), "--default-model", "claude-haiku-4-5"]
+    assert "--transient-setup" not in captured["command"]
     assert "BROKK_TEST_SECRET" not in captured["env"]
 
 
@@ -121,7 +122,7 @@ def test_resolve_anvil_binary_redownloads_invalid_cached_binary(monkeypatch, tmp
 
 
 def test_download_anvil_redownloads_invalid_cache_after_lock(monkeypatch, tmp_path) -> None:
-    target = tmp_path / "cache" / "anvil" / "0.9.1" / "fake-triple" / "anvil"
+    target = tmp_path / "cache" / "anvil" / "0.9.2" / "fake-triple" / "anvil"
     target.parent.mkdir(parents=True)
     target.write_text("corrupted")
     target.chmod(0o755)
@@ -153,7 +154,7 @@ def test_download_anvil_redownloads_invalid_cache_after_lock(monkeypatch, tmp_pa
     monkeypatch.setattr(anvil_launcher, "_verify_sha256", fake_verify_sha256)
     monkeypatch.setattr(anvil_launcher, "_extract_anvil_binary", fake_extract)
 
-    resolved = anvil_launcher._download_anvil("0.9.1")
+    resolved = anvil_launcher._download_anvil("0.9.2")
 
     assert resolved == target
     assert target.read_text() == "downloaded"
@@ -179,10 +180,10 @@ def test_anvil_version_matches_parses_expected_format(monkeypatch, tmp_path) -> 
 
     class FakeCompleted:
         returncode = 0
-        stdout = "anvil 0.9.1\n"
+        stdout = "anvil 0.9.2\n"
         stderr = ""
 
     monkeypatch.setattr(anvil_launcher.subprocess, "run", lambda *_a, **_k: FakeCompleted())
 
-    assert anvil_launcher._anvil_version_matches(binary, "0.9.1") is True
+    assert anvil_launcher._anvil_version_matches(binary, "0.9.2") is True
     assert anvil_launcher._anvil_version_matches(binary, "0.9.0") is False
