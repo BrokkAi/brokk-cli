@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -18,6 +19,14 @@ from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
 from brokk_code.executor import ExecutorError
 from brokk_code.git_utils import infer_github_repo_from_remote
+from brokk_code.headless_anvil import (
+    HeadlessAcpClient,
+    build_commit_prompt,
+    build_headless_prompt,
+    build_pr_create_prompt,
+    build_pr_review_prompt,
+    github_env_from_tags,
+)
 from brokk_code.intellij_config import configure_intellij_acp_settings
 from brokk_code.mcp_config import (
     configure_claude_code_mcp_settings,
@@ -44,6 +53,27 @@ DEFAULT_PLANNER_MODEL = "gpt-5.4"
 DEFAULT_CODE_MODEL = "gemini-3-flash-preview"
 
 REPO_COMPONENT_ALLOWLIST_REGEX = r"^[A-Za-z0-9_.-]+$"
+
+
+def _extract_event_text(event: dict[str, Any]) -> str:
+    raw = event.get("data")
+    if isinstance(raw, str):
+        return raw.strip()
+    data = safe_data(event)
+    for key in ("message", "text", "detail", "error", "token", "resultText", "output"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("message", "text", "detail", "error", "token", "resultText", "output"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _extract_pr_url(text: str) -> str:
+    match = re.search(r"https://github\.com/[^\s)]+/pull/\d+", text)
+    return match.group(0) if match else ""
 
 
 def _resolve_neovim_plugin(*, plugin: str | None) -> str:
@@ -179,6 +209,21 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
         dest="executor_snapshot",
         help="[Ignored] Java executor compatibility flag",
     )
+    parser.add_argument(
+        "--anvil-binary",
+        type=Path,
+        default=None,
+        help="Path to an Anvil binary for headless/ACP commands",
+    )
+    parser.add_argument(
+        "--anvil-version",
+        type=str,
+        default=BUNDLED_ANVIL_VERSION,
+        help=(
+            "Anvil version to use when downloading for headless/ACP commands "
+            f"(default: {BUNDLED_ANVIL_VERSION})"
+        ),
+    )
 
 
 def _add_acp_runtime_args(parser: argparse.ArgumentParser) -> None:
@@ -311,6 +356,8 @@ def _run_issue_command(
                 executor_version=args.executor_version,
                 executor_snapshot=args.executor_snapshot,
                 vendor=args.vendor,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
         )
 
@@ -749,37 +796,60 @@ async def run_commit(
     executor_version: str | None = None,
     executor_snapshot: bool = True,
     vendor: str | None = None,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Commits current changes via ExecutorManager."""
-    from brokk_code.executor import ExecutorError, ExecutorManager
+    """Commits current changes via Anvil ACP."""
+    from brokk_code.executor import ExecutorError
 
-    manager = ExecutorManager(
+    manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
     )
 
     try:
         await manager.start()
-        if not await manager.wait_live():
-            print("Error: executor failed to become live.", file=sys.stderr)
+        transcript: list[str] = []
+        last_error: str | None = None
+        last_state: str | None = None
+        prompt = build_commit_prompt(message=message)
+        async for event in manager.run_prompt(prompt):
+            event_type = event.get("type")
+            data = safe_data(event)
+            text = _extract_event_text(event)
+            if text:
+                transcript.append(text)
+            if event_type == "ERROR":
+                last_error = text or "unknown error"
+            elif event_type == "STATE_CHANGE":
+                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
+
+        output = "\n".join(transcript)
+        if last_error or (last_state and is_failure_state(last_state)):
+            detail = f": {last_error}" if last_error else ""
+            print(f"Anvil ACP error during commit{detail}", file=sys.stderr)
             sys.exit(1)
 
-        result = await manager.commit_context(message)
-
-        if result.get("status") == "no_changes":
+        if re.search(r"COMMIT:\s*no changes", output, re.IGNORECASE):
             print("No uncommitted changes.")
         else:
-            commit_id = result.get("commitId", "")
-            first_line = result.get("firstLine", "")
-            short_id = commit_id[:7] if commit_id else ""
-            print(f"Committed {short_id}: {first_line}")
+            match = re.search(
+                r"COMMIT:\s*committed\s+([0-9a-fA-F]{7,40})(?:\s+([^\r\n]+))?",
+                output,
+                re.IGNORECASE,
+            )
+            if match:
+                commit_id = match.group(1)
+                first_line = (match.group(2) or "").strip()
+                short_id = commit_id[:7]
+                suffix = f": {first_line}" if first_line else ""
+                print(f"Committed {short_id}{suffix}")
+            else:
+                print("Commit completed.")
 
     except ExecutorError as e:
-        print(f"Executor error: {e}", file=sys.stderr)
+        print(f"Anvil ACP error during commit: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Unexpected error: {e}", file=sys.stderr)
@@ -799,66 +869,55 @@ async def run_pr_create(
     executor_version: str | None = None,
     executor_snapshot: bool = True,
     vendor: str | None = None,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Creates a pull request via ExecutorManager.
+    """Creates a pull request via Anvil ACP."""
+    from brokk_code.executor import ExecutorError
 
-    If title or body is not provided, the executor will suggest them via LLM.
-    """
-    from brokk_code.executor import ExecutorError, ExecutorManager
-
-    manager = ExecutorManager(
+    manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        env={"GITHUB_TOKEN": github_token} if github_token else {},
     )
 
     try:
         await manager.start()
-        if not await manager.wait_live():
-            print("Error: executor failed to become live.", file=sys.stderr)
+        transcript: list[str] = []
+        last_error: str | None = None
+        last_state: str | None = None
+        prompt = build_pr_create_prompt(
+            title=title,
+            body=body,
+            base_branch=base_branch,
+            head_branch=head_branch,
+        )
+        async for event in manager.run_prompt(prompt):
+            event_type = event.get("type")
+            data = safe_data(event)
+            text = _extract_event_text(event)
+            if text:
+                transcript.append(text)
+            if event_type == "ERROR":
+                last_error = text or "unknown error"
+            elif event_type == "STATE_CHANGE":
+                last_state = str(data.get("state", event.get("state", "UNKNOWN")))
+
+        if last_error or (last_state and is_failure_state(last_state)):
+            detail = f": {last_error}" if last_error else ""
+            print(f"Anvil ACP error during PR create{detail}", file=sys.stderr)
             sys.exit(1)
 
-        # If title or body is missing, suggest them first
-        effective_title = title
-        effective_body = body
-        if not effective_title or not effective_body:
-            print("Suggesting PR title and description...", flush=True)
-            suggestion = await manager.pr_suggest(
-                source_branch=head_branch,
-                target_branch=base_branch,
-                github_token=github_token,
-            )
-            if not effective_title:
-                effective_title = suggestion.get("title", "")
-            if not effective_body:
-                effective_body = suggestion.get("description", "")
-
-            if not effective_title:
-                print("Error: could not determine PR title.", file=sys.stderr)
-                sys.exit(1)
-            if not effective_body:
-                effective_body = ""
-
-        # Create the PR
-        result = await manager.pr_create(
-            title=effective_title,
-            body=effective_body,
-            source_branch=head_branch,
-            target_branch=base_branch,
-            github_token=github_token,
-        )
-
-        pr_url = result.get("url", "")
+        output = "\n".join(transcript)
+        pr_url = _extract_pr_url(output)
         if pr_url:
             print(f"Pull request created: {pr_url}")
         else:
             print("Pull request created.")
 
     except ExecutorError as e:
-        print(f"Executor error: {e}", file=sys.stderr)
+        print(f"Anvil ACP error during PR create: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Unexpected error: {e}", file=sys.stderr)
@@ -880,17 +939,18 @@ async def run_pr_review_job(
     executor_version: str | None = None,
     executor_snapshot: bool = True,
     vendor: str | None = None,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Runs a PR review job via ExecutorManager and streams events to stdout."""
-    from brokk_code.executor import ExecutorError, ExecutorManager
+    """Runs a PR review job via Anvil ACP and streams events to stdout."""
+    from brokk_code.executor import ExecutorError
 
-    manager = ExecutorManager(
+    manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        default_model=planner_model,
+        env={"GITHUB_TOKEN": github_token},
     )
 
     stage = "initializing"
@@ -948,25 +1008,15 @@ async def run_pr_review_job(
         manager.shutdown_context = ", ".join(context_parts)
 
     try:
-        stage = "starting executor"
+        stage = "starting Anvil"
         _update_shutdown_context()
         await manager.start()
 
-        stage = "waiting for executor liveness"
-        _update_shutdown_context()
-        if not await manager.wait_live():
-            print(
-                f"Error during PR review job ({stage}): executor failed to become live.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        stage = "submitting job"
+        stage = "submitting prompt"
         _update_shutdown_context()
         _render_spinner()
-        job_id = await manager.submit_pr_review_job(
-            planner_model=planner_model,
-            github_token=github_token,
+        job_id = f"acp-{uuid.uuid4()}"
+        prompt = build_pr_review_prompt(
             owner=repo_owner,
             repo=repo_name,
             pr_number=pr_number,
@@ -974,9 +1024,9 @@ async def run_pr_review_job(
         )
         _update_shutdown_context()
 
-        stage = "streaming job events"
+        stage = "streaming ACP events"
         _update_shutdown_context()
-        async for event in manager.stream_events(job_id):
+        async for event in manager.run_prompt(prompt, model=planner_model):
             _render_spinner()
             event_type = event.get("type")
             data = safe_data(event)
@@ -1039,7 +1089,7 @@ async def run_pr_review_job(
     except ExecutorError as e:
         _clear_spinner()
         _update_shutdown_context()
-        print(f"Executor error during PR review job ({stage}): {e}", file=sys.stderr)
+        print(f"Anvil ACP error during PR review job ({stage}): {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         _clear_spinner()
@@ -1068,17 +1118,18 @@ async def run_headless_job(
     executor_version: str | None = None,
     executor_snapshot: bool = True,
     vendor: str | None = None,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
-    """Runs a non-interactive job via ExecutorManager and streams events to stdout."""
-    from brokk_code.executor import ExecutorError, ExecutorManager
+    """Runs a non-interactive job via Anvil ACP and streams events to stdout."""
+    from brokk_code.executor import ExecutorError
 
-    manager = ExecutorManager(
+    manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
-        jar_path=jar_path,
-        executor_version=executor_version,
-        executor_snapshot=executor_snapshot,
-        vendor=vendor,
-        exit_on_stdin_eof=True,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+        default_model=planner_model,
+        env=github_env_from_tags(tags),
     )
 
     stage = "initializing"
@@ -1167,28 +1218,16 @@ async def run_headless_job(
         manager.shutdown_context = ", ".join(context_parts)
 
     try:
-        stage = "starting executor"
+        stage = "starting Anvil"
         _update_shutdown_context()
         await manager.start()
 
-        stage = "waiting for executor liveness"
-        _update_shutdown_context()
-        if not await manager.wait_live():
-            print(
-                f"Error during {mode} job ({stage}): executor failed to become live.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        stage = "submitting job"
+        stage = "submitting prompt"
         _update_shutdown_context()
         _render_spinner()
-        job_id = await manager.submit_job(
+        job_id = f"acp-{uuid.uuid4()}"
+        prompt = build_headless_prompt(
             task_input=task_input,
-            planner_model=planner_model,
-            code_model=code_model,
-            reasoning_level=planner_reasoning_level,
-            reasoning_level_code=code_reasoning_level,
             mode=mode,
             tags=tags,
             skip_verification=skip_verification,
@@ -1196,9 +1235,9 @@ async def run_headless_job(
         )
         _update_shutdown_context()
 
-        stage = "streaming job events"
+        stage = "streaming ACP events"
         _update_shutdown_context()
-        async for event in manager.stream_events(job_id):
+        async for event in manager.run_prompt(prompt, model=planner_model):
             _render_spinner()
             event_type = event.get("type")
             data = safe_data(event)
@@ -1212,7 +1251,7 @@ async def run_headless_job(
                 # LITE_AGENT always shows notifications; others only show WARN/ERROR.
                 if (
                     not verbose
-                    and mode not in {"LITE_AGENT", "LITE_PLAN"}
+                    and mode != "LITE_AGENT"
                     and level not in {"WARN", "WARNING", "ERROR"}
                 ):
                     continue
@@ -1228,7 +1267,7 @@ async def run_headless_job(
                 text = str(data.get("token", event.get("text", "")))
                 _record_issue_url(text)
                 # LITE_AGENT always streams tokens; other modes only when verbose.
-                if (verbose or mode in {"LITE_AGENT", "LITE_PLAN"}) and text:
+                if (verbose or mode == "LITE_AGENT") and text:
                     sys.stdout.write(text)
                     sys.stdout.flush()
                 continue
@@ -1291,7 +1330,7 @@ async def run_headless_job(
     except ExecutorError as e:
         _clear_spinner()
         _update_shutdown_context()
-        print(f"Executor error during {mode} job ({stage}): {e}", file=sys.stderr)
+        print(f"Anvil ACP error during {mode} job ({stage}): {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         _clear_spinner()
@@ -1736,6 +1775,8 @@ def _main_dispatch(
                 executor_version=args.executor_version,
                 executor_snapshot=args.executor_snapshot,
                 vendor=args.vendor,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
         )
         return
@@ -1749,6 +1790,8 @@ def _main_dispatch(
                 executor_version=args.executor_version,
                 executor_snapshot=args.executor_snapshot,
                 vendor=args.vendor,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
         )
         return
@@ -1767,6 +1810,8 @@ def _main_dispatch(
                     executor_version=args.executor_version,
                     executor_snapshot=args.executor_snapshot,
                     vendor=args.vendor,
+                    anvil_binary=args.anvil_binary,
+                    anvil_version=args.anvil_version,
                 )
             )
         if args.pr_command == "review":
@@ -1795,6 +1840,8 @@ def _main_dispatch(
                     executor_version=args.executor_version,
                     executor_snapshot=args.executor_snapshot,
                     vendor=args.vendor,
+                    anvil_binary=args.anvil_binary,
+                    anvil_version=args.anvil_version,
                 )
             )
         return

@@ -4,12 +4,56 @@ from contextlib import contextmanager
 from io import StringIO
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 import brokk_code.__main__ as main_module
 import brokk_code.git_utils as git_utils_module
+
+ISSUE_TAGS = {
+    "github_token": "ghp_test",
+    "repo_owner": "brokkai",
+    "repo_name": "brokk",
+}
+
+
+def _patch_headless_client(
+    monkeypatch,
+    *,
+    events: list[dict[str, Any]] | None = None,
+    call_order: list[str] | None = None,
+    start_error: Exception | None = None,
+    prompt_error: Exception | None = None,
+) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    class FakeHeadlessAcpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["init_kwargs"] = kwargs
+            self.shutdown_context: str | None = None
+
+        async def start(self) -> None:
+            if call_order is not None:
+                call_order.append("start")
+            if start_error is not None:
+                raise start_error
+
+        async def run_prompt(self, prompt: str, *, model: str | None = None):
+            captured["prompt"] = prompt
+            captured["model"] = model
+            if call_order is not None:
+                call_order.append("run_prompt")
+            if prompt_error is not None:
+                raise prompt_error
+            for event in events or []:
+                yield event
+
+        async def stop(self) -> None:
+            if call_order is not None:
+                call_order.append("stop")
+
+    monkeypatch.setattr(main_module, "HeadlessAcpClient", FakeHeadlessAcpClient)
+    return captured
 
 
 def _stub_install_warmup(monkeypatch, stub_api_key: bool = True) -> None:
@@ -1027,37 +1071,14 @@ def test_main_issue_create_verbose_routes_correctly(monkeypatch, tmp_path) -> No
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_headless_job_waits_for_live_before_submit(mock_executor_class, tmp_path) -> None:
-    """Verifies that run_headless_job waits for liveness before submitting."""
-    from unittest.mock import AsyncMock
-
+async def test_run_headless_job_starts_before_prompt(monkeypatch, tmp_path) -> None:
+    """Verifies that run_headless_job starts Anvil before submitting the prompt."""
     call_order: list[str] = []
-    mock_manager = mock_executor_class.return_value
-
-    async def mock_start():
-        call_order.append("start")
-
-    async def mock_wait_live(timeout: float = 30.0):
-        call_order.append("wait_live")
-        return True
-
-    async def mock_submit_job(**kwargs):
-        call_order.append("submit_job")
-        return "job-456"
-
-    async def mock_stream_events(job_id: str):
-        # Yield a terminal state event to end the job
-        yield {"type": "STATE_CHANGE", "state": "COMPLETED"}
-
-    async def mock_stop():
-        call_order.append("stop")
-
-    mock_manager.start = AsyncMock(side_effect=mock_start)
-    mock_manager.wait_live = AsyncMock(side_effect=mock_wait_live)
-    mock_manager.submit_job = AsyncMock(side_effect=mock_submit_job)
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock(side_effect=mock_stop)
+    _patch_headless_client(
+        monkeypatch,
+        events=[{"type": "STATE_CHANGE", "state": "COMPLETED"}],
+        call_order=call_order,
+    )
 
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
@@ -1067,40 +1088,29 @@ async def test_run_headless_job_waits_for_live_before_submit(mock_executor_class
         tags={},
     )
 
-    # Verify lifecycle ordering: start -> wait_live -> submit_job
     assert "start" in call_order
-    assert "wait_live" in call_order
-    assert "submit_job" in call_order
+    assert "run_prompt" in call_order
 
     start_idx = call_order.index("start")
-    wait_live_idx = call_order.index("wait_live")
-    submit_job_idx = call_order.index("submit_job")
+    run_prompt_idx = call_order.index("run_prompt")
 
-    assert start_idx < wait_live_idx, "start() must be called before wait_live()"
-    assert wait_live_idx < submit_job_idx, "wait_live() must be called before submit_job()"
+    assert start_idx < run_prompt_idx, "start() must be called before run_prompt()"
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_reports_failed_terminal_state(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {"type": "STATE_CHANGE", "state": "RUNNING"}
-        yield {"type": "ERROR", "message": "GitHub API returned 403"}
-        yield {"type": "STATE_CHANGE", "state": "FAILED"}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+    call_order: list[str] = []
+    _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        events=[
+            {"type": "STATE_CHANGE", "state": "RUNNING"},
+            {"type": "ERROR", "message": "GitHub API returned 403"},
+            {"type": "STATE_CHANGE", "state": "FAILED"},
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_headless_job(
@@ -1108,7 +1118,7 @@ async def test_run_headless_job_reports_failed_terminal_state(
             task_input="Create issue",
             planner_model="test-model",
             mode="ISSUE_WRITER",
-            tags={},
+            tags=ISSUE_TAGS,
         )
 
     captured = capsys.readouterr()
@@ -1116,24 +1126,21 @@ async def test_run_headless_job_reports_failed_terminal_state(
     assert "Error event: GitHub API returned 403" in captured.err
     assert "ISSUE_WRITER job ended with state FAILED." in captured.err
     assert "Last error: GitHub API returned 403" in captured.err
-    mock_manager.stop.assert_awaited_once()
+    assert "stop" in call_order
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_reports_stage_on_submit_failure(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
     from brokk_code.executor import ExecutorError
 
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(side_effect=ExecutorError("401 Unauthorized"))
-    mock_manager.stop = AsyncMock()
+    call_order: list[str] = []
+    _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        prompt_error=ExecutorError("401 Unauthorized"),
+    )
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_headless_job(
@@ -1141,40 +1148,30 @@ async def test_run_headless_job_reports_stage_on_submit_failure(
             task_input="Create issue",
             planner_model="test-model",
             mode="ISSUE_WRITER",
-            tags={},
+            tags=ISSUE_TAGS,
         )
 
     captured = capsys.readouterr()
     assert exc.value.code == 1
-    assert (
-        "Executor error during ISSUE_WRITER job (submitting job): 401 Unauthorized" in captured.err
-    )
-    mock_manager.stop.assert_awaited_once()
+    assert "Anvil ACP error during ISSUE_WRITER job (streaming ACP events)" in captured.err
+    assert "401 Unauthorized" in captured.err
+    assert "stop" in call_order
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_uses_nested_event_data_for_errors_and_quiet_notifications(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {"type": "NOTIFICATION", "data": {"level": "INFO", "message": ""}}
-        yield {"type": "NOTIFICATION", "data": {"level": "WARN", "message": "rate limit near"}}
-        yield {"type": "LLM_TOKEN", "data": {"token": "hello"}}
-        yield {"type": "ERROR", "data": {"message": "executor boom"}}
-        yield {"type": "STATE_CHANGE", "data": {"state": "FAILED"}}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "NOTIFICATION", "data": {"level": "INFO", "message": ""}},
+            {"type": "NOTIFICATION", "data": {"level": "WARN", "message": "rate limit near"}},
+            {"type": "LLM_TOKEN", "data": {"token": "hello"}},
+            {"type": "ERROR", "data": {"message": "executor boom"}},
+            {"type": "STATE_CHANGE", "data": {"state": "FAILED"}},
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_headless_job(
@@ -1182,7 +1179,7 @@ async def test_run_headless_job_uses_nested_event_data_for_errors_and_quiet_noti
             task_input="Create issue",
             planner_model="test-model",
             mode="ISSUE_WRITER",
-            tags={},
+            tags=ISSUE_TAGS,
         )
 
     captured = capsys.readouterr()
@@ -1195,36 +1192,27 @@ async def test_run_headless_job_uses_nested_event_data_for_errors_and_quiet_noti
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_verbose_shows_full_event_output(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "planning"}}
-        yield {"type": "STATE_CHANGE", "data": {"state": "RUNNING"}}
-        yield {"type": "LLM_TOKEN", "data": {"token": "hello"}}
-        yield {"type": "COMMAND_RESULT", "data": {"command": "gh issue create", "output": "ok"}}
-        yield {"type": "TOOL_OUTPUT", "data": {"text": "tool text"}}
-        yield {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "planning"}},
+            {"type": "STATE_CHANGE", "data": {"state": "RUNNING"}},
+            {"type": "LLM_TOKEN", "data": {"token": "hello"}},
+            {"type": "COMMAND_RESULT", "data": {"command": "gh issue create", "output": "ok"}},
+            {"type": "TOOL_OUTPUT", "data": {"text": "tool text"}},
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
         planner_model="test-model",
         mode="ISSUE_WRITER",
-        tags={},
+        tags=ISSUE_TAGS,
         verbose=True,
     )
 
@@ -1237,26 +1225,17 @@ async def test_run_headless_job_verbose_shows_full_event_output(
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_exits_nonzero_on_error_event_without_failed_state(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "Job started"}}
-        yield {"type": "ERROR", "data": {"message": "parseIssueResponse: invalid JSON"}}
-        # Stream ends without a terminal FAILED/CANCELLED state event.
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "NOTIFICATION", "data": {"level": "INFO", "message": "Job started"}},
+            {"type": "ERROR", "data": {"message": "parseIssueResponse: invalid JSON"}},
+            # Stream ends without a terminal FAILED/CANCELLED state event.
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_headless_job(
@@ -1264,7 +1243,7 @@ async def test_run_headless_job_exits_nonzero_on_error_event_without_failed_stat
             task_input="Create issue",
             planner_model="test-model",
             mode="ISSUE_WRITER",
-            tags={},
+            tags=ISSUE_TAGS,
         )
 
     captured = capsys.readouterr()
@@ -1275,36 +1254,27 @@ async def test_run_headless_job_exits_nonzero_on_error_event_without_failed_stat
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_prints_issue_created_link_from_suppressed_tokens(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {"type": "LLM_TOKEN", "data": {"token": "Created issue: "}}
-        yield {
-            "type": "LLM_TOKEN",
-            "data": {"token": "https://github.com/brokkai/brokk/issues/123"},
-        }
-        yield {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "LLM_TOKEN", "data": {"token": "Created issue: "}},
+            {
+                "type": "LLM_TOKEN",
+                "data": {"token": "https://github.com/brokkai/brokk/issues/123"},
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
         planner_model="test-model",
         mode="ISSUE_WRITER",
-        tags={},
+        tags=ISSUE_TAGS,
     )
 
     captured = capsys.readouterr()
@@ -1314,38 +1284,32 @@ async def test_run_headless_job_prints_issue_created_link_from_suppressed_tokens
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_prints_issue_created_link_from_issue_writer_notification(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {
-            "type": "NOTIFICATION",
-            "data": {
-                "level": "INFO",
-                "message": "ISSUE_WRITER: issue created I_kwDOXYZ https://github.com/brokkai/brokk/issues/456",
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "NOTIFICATION",
+                "data": {
+                    "level": "INFO",
+                    "message": (
+                        "ISSUE_WRITER: issue created I_kwDOXYZ "
+                        "https://github.com/brokkai/brokk/issues/456"
+                    ),
+                },
             },
-        }
-        yield {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
         planner_model="test-model",
         mode="ISSUE_WRITER",
-        tags={},
+        tags=ISSUE_TAGS,
     )
 
     captured = capsys.readouterr()
@@ -1353,39 +1317,30 @@ async def test_run_headless_job_prints_issue_created_link_from_issue_writer_noti
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_prints_issue_created_link_from_tool_output_result_text(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {
-            "type": "TOOL_OUTPUT",
-            "data": {
-                "resultText": "Created: https://github.com/brokkai/brokk/issues/789",
-                "name": "createGitHubIssue",
-                "status": "SUCCESS",
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "TOOL_OUTPUT",
+                "data": {
+                    "resultText": "Created: https://github.com/brokkai/brokk/issues/789",
+                    "name": "createGitHubIssue",
+                    "status": "SUCCESS",
+                },
             },
-        }
-        yield {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
         planner_model="test-model",
         mode="ISSUE_WRITER",
-        tags={},
+        tags=ISSUE_TAGS,
     )
 
     captured = capsys.readouterr()
@@ -1393,40 +1348,31 @@ async def test_run_headless_job_prints_issue_created_link_from_tool_output_resul
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_headless_job_prints_issue_created_link_from_structured_issue_created_event(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        assert job_id == "job-456"
-        yield {
-            "type": "ISSUE_CREATED",
-            "data": {
-                "issueId": "#987",
-                "issueUrl": "https://github.com/brokkai/brokk/issues/987",
-                "repoOwner": "brokkai",
-                "repoName": "brokk",
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "ISSUE_CREATED",
+                "data": {
+                    "issueId": "#987",
+                    "issueUrl": "https://github.com/brokkai/brokk/issues/987",
+                    "repoOwner": "brokkai",
+                    "repoName": "brokk",
+                },
             },
-        }
-        yield {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_headless_job(
         workspace_dir=tmp_path,
         task_input="Create issue",
         planner_model="test-model",
         mode="ISSUE_WRITER",
-        tags={},
+        tags=ISSUE_TAGS,
     )
 
     captured = capsys.readouterr()
@@ -2009,42 +1955,25 @@ def test_main_pr_create_missing_subcommand_exits_nonzero(monkeypatch, tmp_path) 
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_pr_create_with_explicit_title_body(mock_executor_class, tmp_path) -> None:
-    """Verifies run_pr_create skips suggest when title and body are provided."""
-    from unittest.mock import AsyncMock
-
+async def test_run_pr_create_with_explicit_title_body(monkeypatch, tmp_path, capsys) -> None:
+    """Verifies run_pr_create sends explicit title/body in the ACP prompt."""
     call_order: list[str] = []
-    mock_manager = mock_executor_class.return_value
-
-    async def mock_start():
-        call_order.append("start")
-
-    async def mock_create_session(name: str = ""):
-        call_order.append("create_session")
-        return "session-123"
-
-    async def mock_wait_live(timeout: float = 30.0):
-        call_order.append("wait_live")
-        return True
-
-    async def mock_pr_suggest(**kwargs):
-        call_order.append("pr_suggest")
-        return {"title": "Suggested", "description": "Suggested desc"}
-
-    async def mock_pr_create(**kwargs):
-        call_order.append(f"pr_create:title={kwargs.get('title')}")
-        return {"url": "https://github.com/test/repo/pull/42"}
-
-    async def mock_stop():
-        call_order.append("stop")
-
-    mock_manager.start = AsyncMock(side_effect=mock_start)
-    mock_manager.create_session = AsyncMock(side_effect=mock_create_session)
-    mock_manager.wait_live = AsyncMock(side_effect=mock_wait_live)
-    mock_manager.pr_suggest = AsyncMock(side_effect=mock_pr_suggest)
-    mock_manager.pr_create = AsyncMock(side_effect=mock_pr_create)
-    mock_manager.stop = AsyncMock(side_effect=mock_stop)
+    captured = _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        events=[
+            {
+                "type": "LLM_TOKEN",
+                "data": {
+                    "token": (
+                        "PR_CREATE: pull request created "
+                        "https://github.com/test/repo/pull/42"
+                    )
+                },
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_pr_create(
         workspace_dir=tmp_path,
@@ -2053,36 +1982,23 @@ async def test_run_pr_create_with_explicit_title_body(mock_executor_class, tmp_p
         github_token="ghp_test",
     )
 
-    # pr_suggest should NOT be called when title and body are explicit
-    assert "pr_suggest" not in call_order
-    assert "pr_create:title=Explicit Title" in call_order
+    assert captured["init_kwargs"]["env"] == {"GITHUB_TOKEN": "ghp_test"}
+    assert "Use this exact pull request title" in captured["prompt"]
+    assert "Explicit Title" in captured["prompt"]
+    assert "Use this exact pull request body" in captured["prompt"]
+    assert "Explicit Body" in captured["prompt"]
+    assert "run_prompt" in call_order
     assert "stop" in call_order
+    assert "https://github.com/test/repo/pull/42" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_pr_create_suggests_when_title_missing(mock_executor_class, tmp_path) -> None:
-    """Verifies run_pr_create calls suggest when title is missing."""
-    from unittest.mock import AsyncMock
-
-    call_order: list[str] = []
-    mock_manager = mock_executor_class.return_value
-
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-
-    async def mock_pr_suggest(**kwargs):
-        call_order.append("pr_suggest")
-        return {"title": "Suggested Title", "description": "Suggested Desc"}
-
-    async def mock_pr_create(**kwargs):
-        call_order.append(f"pr_create:title={kwargs.get('title')}")
-        return {"url": "https://github.com/test/repo/pull/99"}
-
-    mock_manager.pr_suggest = AsyncMock(side_effect=mock_pr_suggest)
-    mock_manager.pr_create = AsyncMock(side_effect=mock_pr_create)
-    mock_manager.stop = AsyncMock()
+async def test_run_pr_create_derives_title_when_missing(monkeypatch, tmp_path) -> None:
+    """Verifies run_pr_create asks Anvil to derive missing title in the ACP prompt."""
+    captured = _patch_headless_client(
+        monkeypatch,
+        events=[{"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}],
+    )
 
     await main_module.run_pr_create(
         workspace_dir=tmp_path,
@@ -2091,38 +2007,31 @@ async def test_run_pr_create_suggests_when_title_missing(mock_executor_class, tm
         github_token="ghp_test",
     )
 
-    assert "pr_suggest" in call_order
-    # Title should come from suggestion, body was explicit
-    assert "pr_create:title=Suggested Title" in call_order
+    assert "Derive a clear pull request title" in captured["prompt"]
+    assert "Use this exact pull request body" in captured["prompt"]
+    assert "Explicit Body" in captured["prompt"]
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_pr_create_suggests_when_both_title_and_body_omitted(
-    mock_executor_class, tmp_path, capsys
+async def test_run_pr_create_derives_title_body_and_uses_branches(
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    """Verifies run_pr_create calls suggest with branches and token when both fields omitted."""
-    from unittest.mock import AsyncMock
-
-    captured_suggest_args: dict[str, Any] = {}
-    captured_create_args: dict[str, Any] = {}
-    mock_manager = mock_executor_class.return_value
-
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-
-    async def mock_pr_suggest(**kwargs):
-        captured_suggest_args.update(kwargs)
-        return {"title": "Auto-generated Title", "description": "Auto-generated Body"}
-
-    async def mock_pr_create(**kwargs):
-        captured_create_args.update(kwargs)
-        return {"url": "https://github.com/org/repo/pull/777"}
-
-    mock_manager.pr_suggest = AsyncMock(side_effect=mock_pr_suggest)
-    mock_manager.pr_create = AsyncMock(side_effect=mock_pr_create)
-    mock_manager.stop = AsyncMock()
+    """Verifies run_pr_create passes branch guidance and token to ACP."""
+    captured = _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "NOTIFICATION",
+                "data": {
+                    "message": (
+                        "PR_CREATE: pull request created "
+                        "https://github.com/org/repo/pull/777"
+                    )
+                },
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_pr_create(
         workspace_dir=tmp_path,
@@ -2133,43 +2042,28 @@ async def test_run_pr_create_suggests_when_both_title_and_body_omitted(
         github_token="ghp_both_omitted_token",
     )
 
-    # Verify pr_suggest was called with resolved branches and token
-    mock_manager.pr_suggest.assert_called_once()
-    assert captured_suggest_args["source_branch"] == "feature-xyz"
-    assert captured_suggest_args["target_branch"] == "main"
-    assert captured_suggest_args["github_token"] == "ghp_both_omitted_token"
-
-    # Verify pr_create received the suggested title and description
-    mock_manager.pr_create.assert_called_once()
-    assert captured_create_args["title"] == "Auto-generated Title"
-    assert captured_create_args["body"] == "Auto-generated Body"
-    assert captured_create_args["source_branch"] == "feature-xyz"
-    assert captured_create_args["target_branch"] == "main"
-    assert captured_create_args["github_token"] == "ghp_both_omitted_token"
-
-    # Verify PR URL is printed
-    captured = capsys.readouterr()
-    assert "https://github.com/org/repo/pull/777" in captured.out
-
-    mock_manager.stop.assert_awaited_once()
+    assert captured["init_kwargs"]["env"] == {"GITHUB_TOKEN": "ghp_both_omitted_token"}
+    assert "Use `main` as the base branch." in captured["prompt"]
+    assert "Use `feature-xyz` as the head branch." in captured["prompt"]
+    assert "Derive a clear pull request title" in captured["prompt"]
+    assert "Derive a useful Markdown pull request body" in captured["prompt"]
+    assert "https://github.com/org/repo/pull/777" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_pr_create_executor_error_exits_nonzero(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    """Verifies run_pr_create exits non-zero on executor error."""
-    from unittest.mock import AsyncMock
-
-    from brokk_code.executor import ExecutorError
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.pr_create = AsyncMock(side_effect=ExecutorError("GitHub API error"))
-    mock_manager.stop = AsyncMock()
+    """Verifies run_pr_create exits non-zero on ACP error event."""
+    call_order: list[str] = []
+    _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        events=[
+            {"type": "ERROR", "data": {"message": "GitHub API error"}},
+            {"type": "STATE_CHANGE", "data": {"state": "FAILED"}},
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_pr_create(
@@ -2181,9 +2075,9 @@ async def test_run_pr_create_executor_error_exits_nonzero(
 
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "Executor error" in captured.err
+    assert "Anvil ACP error during PR create" in captured.err
     assert "GitHub API error" in captured.err
-    mock_manager.stop.assert_awaited_once()
+    assert "stop" in call_order
 
 
 def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -2243,32 +2137,20 @@ def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_commit_calls_lifecycle_in_order(mock_executor_class, tmp_path) -> None:
+async def test_run_commit_calls_lifecycle_in_order(monkeypatch, tmp_path) -> None:
     """Verifies that run_commit follows the correct lifecycle order."""
-    from unittest.mock import AsyncMock
-
     call_order: list[str] = []
-    mock_manager = mock_executor_class.return_value
-
-    async def mock_start():
-        call_order.append("start")
-
-    async def mock_wait_live(timeout: float = 30.0):
-        call_order.append("wait_live")
-        return True
-
-    async def mock_commit_context(message=None):
-        call_order.append(f"commit_context:{message}")
-        return {"commitId": "abc123", "firstLine": "Test commit"}
-
-    async def mock_stop():
-        call_order.append("stop")
-
-    mock_manager.start = AsyncMock(side_effect=mock_start)
-    mock_manager.wait_live = AsyncMock(side_effect=mock_wait_live)
-    mock_manager.commit_context = AsyncMock(side_effect=mock_commit_context)
-    mock_manager.stop = AsyncMock(side_effect=mock_stop)
+    captured = _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        events=[
+            {
+                "type": "LLM_TOKEN",
+                "data": {"token": "COMMIT: committed abc1234567890 Test commit"},
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_commit(
         workspace_dir=tmp_path,
@@ -2276,88 +2158,83 @@ async def test_run_commit_calls_lifecycle_in_order(mock_executor_class, tmp_path
     )
 
     assert "start" in call_order
-    assert "wait_live" in call_order
-    assert "commit_context:My commit message" in call_order
+    assert "run_prompt" in call_order
     assert "stop" in call_order
+    assert "My commit message" in captured["prompt"]
+    assert "Use this exact commit message" in captured["prompt"]
 
     start_idx = call_order.index("start")
-    wait_live_idx = call_order.index("wait_live")
-    commit_idx = call_order.index("commit_context:My commit message")
+    prompt_idx = call_order.index("run_prompt")
     stop_idx = call_order.index("stop")
 
-    assert start_idx < wait_live_idx
-    assert wait_live_idx < commit_idx
-    assert commit_idx < stop_idx
+    assert start_idx < prompt_idx
+    assert prompt_idx < stop_idx
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_commit_no_changes(mock_executor_class, tmp_path, capsys) -> None:
+async def test_run_commit_no_changes(monkeypatch, tmp_path, capsys) -> None:
     """Verifies that run_commit handles no changes case."""
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.commit_context = AsyncMock(return_value={"status": "no_changes"})
-    mock_manager.stop = AsyncMock()
+    call_order: list[str] = []
+    _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        events=[
+            {"type": "LLM_TOKEN", "data": {"token": "COMMIT: no changes"}},
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
+    )
 
     await main_module.run_commit(workspace_dir=tmp_path, message=None)
 
     captured = capsys.readouterr()
     assert "No uncommitted changes" in captured.out
-    mock_manager.stop.assert_awaited_once()
+    assert "stop" in call_order
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_commit_success_output(mock_executor_class, tmp_path, capsys) -> None:
+async def test_run_commit_success_output(monkeypatch, tmp_path, capsys) -> None:
     """Verifies that run_commit prints commit info on success."""
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.commit_context = AsyncMock(
-        return_value={"commitId": "abc1234567890", "firstLine": "Fix parser bug"}
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {
+                "type": "NOTIFICATION",
+                "data": {"message": "COMMIT: committed abc1234567890 Fix parser bug"},
+            },
+            {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}},
+        ],
     )
-    mock_manager.stop = AsyncMock()
 
     await main_module.run_commit(workspace_dir=tmp_path, message="Fix parser bug")
 
     captured = capsys.readouterr()
     assert "abc1234" in captured.out
     assert "Fix parser bug" in captured.out
-    mock_manager.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_commit_executor_error_exits_nonzero(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    """Verifies that run_commit exits non-zero on executor error."""
-    from unittest.mock import AsyncMock
-
-    from brokk_code.executor import ExecutorError
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.commit_context = AsyncMock(side_effect=ExecutorError("Git error"))
-    mock_manager.stop = AsyncMock()
+    """Verifies that run_commit exits non-zero on ACP error event."""
+    call_order: list[str] = []
+    _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        events=[
+            {"type": "ERROR", "data": {"message": "Git error"}},
+            {"type": "STATE_CHANGE", "data": {"state": "FAILED"}},
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_commit(workspace_dir=tmp_path, message="test")
 
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "Executor error" in captured.err
+    assert "Anvil ACP error during commit" in captured.err
     assert "Git error" in captured.err
-    mock_manager.stop.assert_awaited_once()
+    assert "stop" in call_order
 
 
 def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -2815,35 +2692,13 @@ def test_infer_github_repo_from_remote_empty_stdout_returns_none(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
-async def test_run_pr_review_job_calls_submit_pr_review_job(mock_executor_class, tmp_path) -> None:
-    from unittest.mock import AsyncMock
-
+async def test_run_pr_review_job_submits_anvil_prompt(monkeypatch, tmp_path) -> None:
     call_order: list[str] = []
-    mock_manager = mock_executor_class.return_value
-
-    async def mock_start():
-        call_order.append("start")
-
-    async def mock_wait_live(timeout: float = 30.0):
-        call_order.append("wait_live")
-        return True
-
-    async def mock_submit_pr_review_job(**kwargs):
-        call_order.append(f"submit_pr_review_job:{kwargs}")
-        return "pr-review-job-456"
-
-    async def mock_stream_events(job_id: str):
-        yield {"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}
-
-    async def mock_stop():
-        call_order.append("stop")
-
-    mock_manager.start = AsyncMock(side_effect=mock_start)
-    mock_manager.wait_live = AsyncMock(side_effect=mock_wait_live)
-    mock_manager.submit_pr_review_job = AsyncMock(side_effect=mock_submit_pr_review_job)
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock(side_effect=mock_stop)
+    captured = _patch_headless_client(
+        monkeypatch,
+        call_order=call_order,
+        events=[{"type": "STATE_CHANGE", "data": {"state": "COMPLETED"}}],
+    )
 
     await main_module.run_pr_review_job(
         workspace_dir=tmp_path,
@@ -2855,37 +2710,24 @@ async def test_run_pr_review_job_calls_submit_pr_review_job(mock_executor_class,
     )
 
     assert "start" in call_order
-    assert "wait_live" in call_order
-    assert any("submit_pr_review_job" in c for c in call_order)
-
-    submit_call = [c for c in call_order if "submit_pr_review_job" in c][0]
-    assert "planner_model" in submit_call
-    assert "gpt-4" in submit_call
-    assert "ghp_test" in submit_call
-    assert "test-owner" in submit_call
-    assert "test-repo" in submit_call
-    assert "42" in submit_call
+    assert "run_prompt" in call_order
+    assert captured["init_kwargs"]["env"] == {"GITHUB_TOKEN": "ghp_test"}
+    assert captured["model"] == "gpt-4"
+    assert "test-owner/test-repo" in captured["prompt"]
+    assert "pull request #42" in captured["prompt"].lower()
 
 
 @pytest.mark.asyncio
-@patch("brokk_code.executor.ExecutorManager")
 async def test_run_pr_review_job_exits_nonzero_on_failed_state(
-    mock_executor_class, tmp_path, capsys
+    monkeypatch, tmp_path, capsys
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    mock_manager = mock_executor_class.return_value
-    mock_manager.start = AsyncMock()
-    mock_manager.create_session = AsyncMock(return_value="session-123")
-    mock_manager.wait_live = AsyncMock(return_value=True)
-    mock_manager.submit_pr_review_job = AsyncMock(return_value="job-456")
-
-    async def mock_stream_events(job_id: str):
-        yield {"type": "ERROR", "data": {"message": "GitHub API error"}}
-        yield {"type": "STATE_CHANGE", "data": {"state": "FAILED"}}
-
-    mock_manager.stream_events = mock_stream_events
-    mock_manager.stop = AsyncMock()
+    _patch_headless_client(
+        monkeypatch,
+        events=[
+            {"type": "ERROR", "data": {"message": "GitHub API error"}},
+            {"type": "STATE_CHANGE", "data": {"state": "FAILED"}},
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc:
         await main_module.run_pr_review_job(
