@@ -48,6 +48,7 @@ class HeadlessAcpClient:
         self.anvil_version = anvil_version
         self.default_model = default_model
         self.session_id: str | None = None
+        self.config_options: list[Any] = []
 
         self._stack: AsyncExitStack | None = None
         self._connection: ClientSideConnection | None = None
@@ -95,6 +96,7 @@ class HeadlessAcpClient:
             )
             response = await connection.new_session(cwd=str(self.workspace_dir))
             self.session_id = response.session_id
+            self.config_options = list(response.config_options or [])
             self._stack = stack
             self._connection = connection
         except Exception:
@@ -123,9 +125,9 @@ class HeadlessAcpClient:
             raise HeadlessAnvilError("Anvil ACP client not started")
 
         if model:
-            await self._set_config_option(ANVIL_MODEL_CONFIG_ID, model)
+            await self.set_config_option(ANVIL_MODEL_CONFIG_ID, model)
         if reasoning_effort:
-            await self._set_config_option(ANVIL_REASONING_EFFORT_CONFIG_ID, reasoning_effort)
+            await self.set_config_option(ANVIL_REASONING_EFFORT_CONFIG_ID, reasoning_effort)
 
         prompt_task = asyncio.create_task(
             self._connection.prompt(
@@ -157,15 +159,17 @@ class HeadlessAcpClient:
             state = "FAILED"
         yield {"type": "STATE_CHANGE", "data": {"state": state}}
 
-    async def _set_config_option(self, config_id: str, value: str) -> None:
+    async def set_config_option(self, config_id: str, value: str) -> list[Any]:
         if self._connection is None or self.session_id is None:
             raise HeadlessAnvilError("Anvil ACP client not started")
         try:
-            await self._connection.set_config_option(
+            response = await self._connection.set_config_option(
                 config_id=config_id,
                 session_id=self.session_id,
                 value=value,
             )
+            self.config_options = list(response.config_options)
+            return self.config_options
         except Exception as exc:
             raise HeadlessAnvilError(
                 f"Anvil rejected session option {config_id}={value!r}: {exc}"

@@ -1,6 +1,12 @@
 from io import StringIO
+from typing import Any
 
+from acp.schema import SessionConfigOptionSelect, SessionConfigSelectOption
+
+import brokk_code.anvil_config as anvil_config_module
 from brokk_code.anvil_config import (
+    AnvilOptionCatalog,
+    AnvilOptionChoice,
     AnvilScriptingConfig,
     AnvilToolSelection,
     configure_anvil_scripting_interactive,
@@ -65,10 +71,19 @@ def test_resolve_anvil_selection_without_config_non_tty_returns_empty() -> None:
 
 
 def test_configure_anvil_scripting_interactive_global() -> None:
-    input_stream = StringIO("y\ncodex::gpt-5.2\n3\n")
+    input_stream = StringIO("y\ncodex::gpt-5.2\nmedium\n")
     output_stream = StringIO()
 
     config = configure_anvil_scripting_interactive(
+        catalog=AnvilOptionCatalog(
+            model_options=[
+                AnvilOptionChoice("codex::gpt-5.2", "codex::gpt-5.2"),
+            ],
+            reasoning_options=[
+                AnvilOptionChoice("low", "low"),
+                AnvilOptionChoice("medium", "medium"),
+            ],
+        ),
         input_stream=input_stream,
         output_stream=output_stream,
     )
@@ -77,6 +92,72 @@ def test_configure_anvil_scripting_interactive_global() -> None:
     assert config.global_selection.model == "codex::gpt-5.2"
     assert config.global_selection.reasoning_effort == "medium"
     assert "Saved Anvil scripting configuration" in output_stream.getvalue()
+
+
+def test_query_anvil_option_catalog_reads_session_config_options(monkeypatch, tmp_path) -> None:
+    class FakeHeadlessAcpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["workspace_dir"] == tmp_path
+            self.config_options = [
+                SessionConfigOptionSelect(
+                    id="model_selection",
+                    name="Model",
+                    type="select",
+                    currentValue="model-a",
+                    options=[
+                        SessionConfigSelectOption(name="Model A", value="model-a"),
+                        SessionConfigSelectOption(name="Model B", value="model-b"),
+                    ],
+                ),
+                SessionConfigOptionSelect(
+                    id="reasoning_effort",
+                    name="Reasoning effort",
+                    type="select",
+                    currentValue="medium",
+                    options=[
+                        SessionConfigSelectOption(name="Default", value="(default)"),
+                        SessionConfigSelectOption(name="Medium", value="medium"),
+                    ],
+                ),
+            ]
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(anvil_config_module, "HeadlessAcpClient", FakeHeadlessAcpClient)
+
+    catalog = anvil_config_module.query_anvil_option_catalog(workspace_dir=tmp_path)
+
+    assert catalog.current_model == "model-a"
+    assert [choice.value for choice in catalog.model_options] == ["model-a", "model-b"]
+    assert catalog.current_reasoning_effort == "medium"
+    assert [choice.value for choice in catalog.reasoning_options] == ["(default)", "medium"]
+
+
+def test_query_anvil_option_catalog_falls_back_on_error(monkeypatch, tmp_path) -> None:
+    class FakeHeadlessAcpClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def start(self) -> None:
+            raise OSError("missing anvil")
+
+        async def stop(self) -> None:
+            return None
+
+    output_stream = StringIO()
+    monkeypatch.setattr(anvil_config_module, "HeadlessAcpClient", FakeHeadlessAcpClient)
+
+    catalog = anvil_config_module.query_anvil_option_catalog(
+        workspace_dir=tmp_path,
+        output_stream=output_stream,
+    )
+
+    assert catalog.model_options == []
+    assert "could not query Anvil config options" in output_stream.getvalue()
 
 
 def test_format_and_delete_anvil_scripting_config() -> None:

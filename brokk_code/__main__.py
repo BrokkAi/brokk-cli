@@ -280,6 +280,9 @@ def _run_issue_command(
         tool_key=tool_key,
         model_override=args.model,
         reasoning_override=args.reasoning_effort,
+        workspace_dir=Path(args.workspace).resolve(),
+        anvil_binary=args.anvil_binary,
+        anvil_version=args.anvil_version,
     )
 
     with _temporary_issue_repo_checkout(
@@ -380,6 +383,24 @@ def _build_parser() -> argparse.ArgumentParser:
     anvil_config_parser = subparsers.add_parser(
         "anvil-config",
         help="Configure model settings for Anvil-backed scripting commands",
+    )
+    anvil_config_parser.add_argument(
+        "--workspace",
+        type=str,
+        default=".",
+        help="Path to use when querying Anvil options (default: current directory)",
+    )
+    anvil_config_parser.add_argument(
+        "--anvil-binary",
+        type=Path,
+        default=None,
+        help="Path to an Anvil binary",
+    )
+    anvil_config_parser.add_argument(
+        "--anvil-version",
+        type=str,
+        default=BUNDLED_ANVIL_VERSION,
+        help=f"Anvil version to use when downloading (default: {BUNDLED_ANVIL_VERSION})",
     )
     anvil_config_parser.add_argument(
         "--show",
@@ -1508,7 +1529,11 @@ def _main_dispatch(
         if args.show:
             print(format_anvil_scripting_config())
             return
-        configure_anvil_scripting_interactive()
+        configure_anvil_scripting_interactive(
+            workspace_dir=workspace_path,
+            anvil_binary=args.anvil_binary,
+            anvil_version=args.anvil_version,
+        )
         return
 
     if args.command == "acp":
@@ -1539,6 +1564,9 @@ def _main_dispatch(
             tool_key="exec",
             model_override=args.model,
             reasoning_override=args.reasoning_effort,
+            workspace_dir=workspace_path,
+            anvil_binary=args.anvil_binary,
+            anvil_version=args.anvil_version,
         )
         asyncio.run(
             run_headless_job(
@@ -1560,6 +1588,9 @@ def _main_dispatch(
             tool_key="commit",
             model_override=args.model,
             reasoning_override=args.reasoning_effort,
+            workspace_dir=workspace_path,
+            anvil_binary=args.anvil_binary,
+            anvil_version=args.anvil_version,
         )
         asyncio.run(
             run_commit(
@@ -1579,6 +1610,9 @@ def _main_dispatch(
                 tool_key="pr_create",
                 model_override=args.model,
                 reasoning_override=args.reasoning_effort,
+                workspace_dir=workspace_path,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
             asyncio.run(
                 run_pr_create(
@@ -1608,6 +1642,9 @@ def _main_dispatch(
                 tool_key="pr_review",
                 model_override=args.model,
                 reasoning_override=args.reasoning_effort,
+                workspace_dir=workspace_path,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
             )
 
             asyncio.run(
