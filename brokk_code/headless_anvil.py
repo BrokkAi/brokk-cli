@@ -62,7 +62,7 @@ class HeadlessAcpClient:
             version=self.anvil_version,
             override=self.anvil_binary,
         )
-        args: list[str] = []
+        args: list[str] = ["--transient-setup"]
         if self.default_model:
             args.extend(["--default-model", self.default_model])
 

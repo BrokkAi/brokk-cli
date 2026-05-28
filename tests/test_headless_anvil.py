@@ -286,11 +286,15 @@ async def test_headless_acp_client_round_trips_against_sdk_agent(
         lambda **_kwargs: tmp_path / "fake-anvil",
     )
 
+    captured_spawn: dict[str, Any] = {}
+
     @contextlib.asynccontextmanager
     async def fake_spawn_stdio_transport(
-        *_args: Any,
-        **_kwargs: Any,
+        *args: Any,
+        **kwargs: Any,
     ) -> AsyncIterator[tuple[asyncio.StreamReader, asyncio.StreamWriter, object]]:
+        captured_spawn["args"] = args
+        captured_spawn["kwargs"] = kwargs
         async with _sdk_agent_transport(agent) as streams:
             yield streams
 
@@ -319,6 +323,12 @@ async def test_headless_acp_client_round_trips_against_sdk_agent(
         await client.stop()
 
     assert agent.cwd == str(tmp_path)
+    assert captured_spawn["args"] == (
+        str(tmp_path / "fake-anvil"),
+        "--transient-setup",
+        "--default-model",
+        "default-model",
+    )
     assert agent.config_options["model_selection"] == "chosen-model"
     assert agent.config_options["reasoning_effort"] == "high"
     assert agent.prompt_text == "hello ACP"
