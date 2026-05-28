@@ -162,9 +162,7 @@ def resolve_anvil_selection(
     return AnvilToolSelection(
         model=model_override if model_override is not None else configured.model,
         reasoning_effort=(
-            reasoning_override
-            if reasoning_override is not None
-            else configured.reasoning_effort
+            reasoning_override if reasoning_override is not None else configured.reasoning_effort
         ),
     )
 

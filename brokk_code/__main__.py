@@ -1612,9 +1612,7 @@ def _main_dispatch(
         if args.reset:
             deleted = delete_anvil_scripting_config()
             message = (
-                "Deleted Anvil scripting configuration."
-                if deleted
-                else "No configuration found."
+                "Deleted Anvil scripting configuration." if deleted else "No configuration found."
             )
             print(message)
             return

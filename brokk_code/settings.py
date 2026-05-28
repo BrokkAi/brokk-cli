@@ -7,6 +7,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 def get_global_config_dir() -> Path:
     """Returns the platform-appropriate global configuration directory for Brokk.
     Mirrors ai.brokk.util.BrokkConfigPaths.java.

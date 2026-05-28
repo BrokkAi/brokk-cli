@@ -1884,8 +1884,7 @@ async def test_run_pr_create_with_explicit_title_body(monkeypatch, tmp_path, cap
                 "type": "LLM_TOKEN",
                 "data": {
                     "token": (
-                        "PR_CREATE: pull request created "
-                        "https://github.com/test/repo/pull/42"
+                        "PR_CREATE: pull request created https://github.com/test/repo/pull/42"
                     )
                 },
             },
@@ -1945,8 +1944,7 @@ async def test_run_pr_create_derives_title_body_and_uses_branches(
                 "type": "NOTIFICATION",
                 "data": {
                     "message": (
-                        "PR_CREATE: pull request created "
-                        "https://github.com/org/repo/pull/777"
+                        "PR_CREATE: pull request created https://github.com/org/repo/pull/777"
                     )
                 },
             },
@@ -1971,9 +1969,7 @@ async def test_run_pr_create_derives_title_body_and_uses_branches(
 
 
 @pytest.mark.asyncio
-async def test_run_pr_create_executor_error_exits_nonzero(
-    monkeypatch, tmp_path, capsys
-) -> None:
+async def test_run_pr_create_executor_error_exits_nonzero(monkeypatch, tmp_path, capsys) -> None:
     """Verifies run_pr_create exits non-zero on ACP error event."""
     call_order: list[str] = []
     _patch_headless_client(
@@ -2196,9 +2192,7 @@ async def test_run_commit_without_marker_or_git_change_exits_nonzero(
 
 
 @pytest.mark.asyncio
-async def test_run_commit_executor_error_exits_nonzero(
-    monkeypatch, tmp_path, capsys
-) -> None:
+async def test_run_commit_executor_error_exits_nonzero(monkeypatch, tmp_path, capsys) -> None:
     """Verifies that run_commit exits non-zero on ACP error event."""
     call_order: list[str] = []
     _patch_headless_client(
