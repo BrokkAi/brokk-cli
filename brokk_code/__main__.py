@@ -11,6 +11,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
+from brokk_code.anvil_config import (
+    configure_anvil_scripting_interactive,
+    delete_anvil_scripting_config,
+    format_anvil_scripting_config,
+    resolve_anvil_selection,
+)
 from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, run_anvil_acp_server
 from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
@@ -107,13 +113,13 @@ def _add_anvil_selection_args(parser: argparse.ArgumentParser) -> None:
         "--model",
         type=str,
         default=None,
-        help="Anvil model id to use for the task (default: Anvil chooses)",
+        help="Override the configured Anvil model id for this task",
     )
     parser.add_argument(
         "--reasoning-effort",
         type=str,
         default=None,
-        help="Anvil reasoning effort to set for the task (for example: low, medium, high)",
+        help="Override the configured Anvil reasoning effort for this task",
     )
 
 
@@ -258,6 +264,7 @@ def _run_issue_command(
     skip_verification: bool | None = None,
     max_issue_fix_attempts: int | None = None,
     build_settings: str | None = None,
+    tool_key: str,
 ) -> None:
     """Run a GitHub issue command with shared validation, checkout, and job execution."""
     _validate_github_params(args.repo_owner, args.repo_name, command_name)
@@ -269,6 +276,11 @@ def _run_issue_command(
         tags["issue_number"] = str(args.issue_number)
     if build_settings:
         tags["build_settings"] = build_settings
+    selection = resolve_anvil_selection(
+        tool_key=tool_key,
+        model_override=args.model,
+        reasoning_override=args.reasoning_effort,
+    )
 
     with _temporary_issue_repo_checkout(
         repo_owner=args.repo_owner,
@@ -279,8 +291,8 @@ def _run_issue_command(
             run_headless_job(
                 workspace_dir=issue_workspace_path,
                 task_input=task_input,
-                model=args.model,
-                reasoning_effort=args.reasoning_effort,
+                model=selection.model,
+                reasoning_effort=selection.reasoning_effort,
                 skip_verification=skip_verification,
                 max_issue_fix_attempts=max_issue_fix_attempts,
                 verbose=args.verbose,
@@ -363,6 +375,23 @@ def _build_parser() -> argparse.ArgumentParser:
             "[Deprecated] Legacy IDE hint (silently ignored). "
             "Kept for backward compatibility with stale editor configs."
         ),
+    )
+
+    anvil_config_parser = subparsers.add_parser(
+        "anvil-config",
+        help="Configure model settings for Anvil-backed scripting commands",
+    )
+    anvil_config_parser.add_argument(
+        "--show",
+        action="store_true",
+        default=False,
+        help="Print the current Anvil scripting configuration",
+    )
+    anvil_config_parser.add_argument(
+        "--reset",
+        action="store_true",
+        default=False,
+        help="Delete the Anvil scripting configuration",
     )
 
     mcp_parser = subparsers.add_parser(
@@ -1157,7 +1186,7 @@ async def run_headless_job(
 
 
 # Commands that don't operate on a workspace and should skip worktree creation
-_NON_WORKSPACE_COMMANDS = {"install", "version"}
+_NON_WORKSPACE_COMMANDS = {"anvil-config", "install", "version"}
 
 
 def _resolve_worktree_workspace_path(
@@ -1466,6 +1495,22 @@ def _main_dispatch(
         print(f"brokk {__version__}")
         return
 
+    if args.command == "anvil-config":
+        if args.reset:
+            deleted = delete_anvil_scripting_config()
+            message = (
+                "Deleted Anvil scripting configuration."
+                if deleted
+                else "No configuration found."
+            )
+            print(message)
+            return
+        if args.show:
+            print(format_anvil_scripting_config())
+            return
+        configure_anvil_scripting_interactive()
+        return
+
     if args.command == "acp":
         run_anvil_acp_server(
             workspace_dir=workspace_path,
@@ -1490,12 +1535,17 @@ def _main_dispatch(
 
     if args.command == "exec":
         workspace_path = resolve_workspace_dir(workspace_path)
+        selection = resolve_anvil_selection(
+            tool_key="exec",
+            model_override=args.model,
+            reasoning_override=args.reasoning_effort,
+        )
         asyncio.run(
             run_headless_job(
                 workspace_dir=workspace_path,
                 task_input=args.prompt,
-                model=args.model,
-                reasoning_effort=args.reasoning_effort,
+                model=selection.model,
+                reasoning_effort=selection.reasoning_effort,
                 mode="LITE_AGENT",
                 tags={"mode": "LITE_AGENT"},
                 verbose=args.verbose,
@@ -1506,12 +1556,17 @@ def _main_dispatch(
         return
 
     if args.command == "commit":
+        selection = resolve_anvil_selection(
+            tool_key="commit",
+            model_override=args.model,
+            reasoning_override=args.reasoning_effort,
+        )
         asyncio.run(
             run_commit(
                 workspace_dir=workspace_path,
                 message=args.message,
-                model=args.model,
-                reasoning_effort=args.reasoning_effort,
+                model=selection.model,
+                reasoning_effort=selection.reasoning_effort,
                 anvil_binary=args.anvil_binary,
                 anvil_version=args.anvil_version,
             )
@@ -1520,6 +1575,11 @@ def _main_dispatch(
 
     if args.command == "pr":
         if args.pr_command == "create":
+            selection = resolve_anvil_selection(
+                tool_key="pr_create",
+                model_override=args.model,
+                reasoning_override=args.reasoning_effort,
+            )
             asyncio.run(
                 run_pr_create(
                     workspace_dir=workspace_path,
@@ -1527,8 +1587,8 @@ def _main_dispatch(
                     body=args.body,
                     base_branch=args.base,
                     head_branch=args.head,
-                    model=args.model,
-                    reasoning_effort=args.reasoning_effort,
+                    model=selection.model,
+                    reasoning_effort=selection.reasoning_effort,
                     anvil_binary=args.anvil_binary,
                     anvil_version=args.anvil_version,
                 )
@@ -1544,6 +1604,11 @@ def _main_dispatch(
                     repo_name = inferred_repo
 
             _validate_github_params(repo_owner, repo_name, "pr review")
+            selection = resolve_anvil_selection(
+                tool_key="pr_review",
+                model_override=args.model,
+                reasoning_override=args.reasoning_effort,
+            )
 
             asyncio.run(
                 run_pr_review_job(
@@ -1551,8 +1616,8 @@ def _main_dispatch(
                     pr_number=args.pr_number,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
-                    model=args.model,
-                    reasoning_effort=args.reasoning_effort,
+                    model=selection.model,
+                    reasoning_effort=selection.reasoning_effort,
                     severity_threshold=args.severity,
                     verbose=args.verbose,
                     anvil_binary=args.anvil_binary,
@@ -1569,6 +1634,7 @@ def _main_dispatch(
                 mode="ISSUE_WRITER",
                 task_input=args.prompt,
                 action_label="Issue create",
+                tool_key="issue_create",
             )
             return
 
@@ -1580,6 +1646,7 @@ def _main_dispatch(
                 task_input=f"Diagnose GitHub Issue #{args.issue_number}",
                 action_label="Issue diagnose",
                 include_issue_number=True,
+                tool_key="issue_diagnose",
             )
             return
 
@@ -1594,6 +1661,7 @@ def _main_dispatch(
                 skip_verification=args.skip_verification,
                 max_issue_fix_attempts=args.max_issue_fix_attempts,
                 build_settings=args.build_settings,
+                tool_key="issue_solve",
             )
             return
 

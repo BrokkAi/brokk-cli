@@ -9,6 +9,7 @@ import pytest
 
 import brokk_code.__main__ as main_module
 import brokk_code.git_utils as git_utils_module
+from brokk_code.anvil_config import AnvilScriptingConfig, AnvilToolSelection
 
 ISSUE_TAGS = {
     "repo_owner": "brokkai",
@@ -171,6 +172,33 @@ def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
         "--bifrost-binary",
         "/opt/bifrost",
     ]
+
+
+def test_main_anvil_config_show(monkeypatch, capsys) -> None:
+    AnvilScriptingConfig(
+        use_global=True,
+        global_selection=AnvilToolSelection(model="configured-model", reasoning_effort="medium"),
+    ).save()
+    monkeypatch.setattr(sys, "argv", ["brokk", "anvil-config", "--show"])
+
+    main_module.main()
+
+    output = capsys.readouterr().out
+    assert "configured-model" in output
+    assert "reasoning_effort=medium" in output
+
+
+def test_main_anvil_config_reset(monkeypatch, capsys) -> None:
+    AnvilScriptingConfig(
+        use_global=True,
+        global_selection=AnvilToolSelection(model="configured-model"),
+    ).save()
+    monkeypatch.setattr(sys, "argv", ["brokk", "anvil-config", "--reset"])
+
+    main_module.main()
+
+    assert "Deleted Anvil scripting configuration." in capsys.readouterr().out
+    assert AnvilScriptingConfig.load() is None
 
 
 def test_main_acp_native_command_is_removed(monkeypatch, tmp_path, capsys) -> None:
@@ -1986,6 +2014,41 @@ def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
     assert captured["kwargs"]["message"] is None
+
+
+def test_main_commit_uses_anvil_config_when_flags_omitted(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {"ran": False}
+    AnvilScriptingConfig(
+        use_global=False,
+        tool_selections={
+            "commit": AnvilToolSelection(
+                model="configured-model",
+                reasoning_effort="high",
+            )
+        },
+    ).save()
+
+    async def fake_run_commit(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+        captured["ran"] = True
+
+    monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "commit",
+            "--workspace",
+            str(tmp_path),
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["ran"] is True
+    assert captured["kwargs"]["model"] == "configured-model"
+    assert captured["kwargs"]["reasoning_effort"] == "high"
 
 
 @pytest.mark.asyncio

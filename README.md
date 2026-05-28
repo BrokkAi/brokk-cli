@@ -61,10 +61,21 @@ brokk-code resolves Anvil in this order: `--anvil-binary` override > `anvil`
 on `$PATH` > a downloaded release pinned to the bundled Anvil version.
 
 Headless task commands (`brokk exec`, `brokk commit`, `brokk pr create`,
-`brokk pr review`, and `brokk issue ...`) also run through Anvil ACP. Pass
-`--model <id>` to set Anvil's `model_selection` session option for that task,
-and `--reasoning-effort <level>` to set Anvil's `reasoning_effort` session
-option. If `--model` is omitted, Anvil chooses its own discovered default.
+`brokk pr review`, and `brokk issue ...`) also run through Anvil ACP. The
+first interactive run opens Anvil scripting configuration; you can also run
+it any time with:
+
+```bash
+uv run brokk anvil-config
+```
+
+The configuration is stored as JSON in Brokk's platform config directory and
+can use one model/reasoning setting for every scripting command or separate
+settings per command. `--model <id>` and `--reasoning-effort <level>` remain
+available as one-off overrides.
+
+Use `brokk anvil-config --show` to inspect the saved JSON-backed settings, or
+`brokk anvil-config --reset` to remove them.
 
 ### Bifrost MCP Mode
 
@@ -168,9 +179,7 @@ The Python CLI supports creating GitHub issues based on repository evidence via 
 # Example: Create an issue for a discovered bug
 brokk issue create "Describe the NPE in AuthService" \
   --repo-owner acme-corp \
-  --repo-name service-api \
-  --model codex::gpt-5.2 \
-  --reasoning-effort medium
+  --repo-name service-api
 ```
 
 **Required Arguments:**
