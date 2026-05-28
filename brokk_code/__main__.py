@@ -525,11 +525,6 @@ def _ensure_gh_available(*, action_label: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    if any(
-        os.environ.get(key)
-        for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
-    ):
-        return
     try:
         subprocess.run(
             ["gh", "auth", "status"],

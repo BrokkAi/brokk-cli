@@ -432,8 +432,13 @@ def _required_tag(tags: dict[str, str], key: str) -> str:
 
 
 def _anvil_subprocess_env() -> dict[str, str]:
-    """Build Anvil's environment for headless scripting commands."""
-    return os.environ.copy()
+    """Build Anvil's environment without forwarding sensitive auth variables."""
+    sensitive_markers = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not any(marker in key.upper() for marker in sensitive_markers)
+    }
 
 
 def _session_update_to_event(update: Any) -> dict[str, Any] | None:

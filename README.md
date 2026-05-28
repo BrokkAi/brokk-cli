@@ -237,7 +237,7 @@ uvx brokk issue solve \
 ```
 
 GitHub authentication is handled by GitHub tooling such as `gh`. `brokk-cli`
-does not accept or forward GitHub token flags.
+does not accept or forward GitHub credentials.
 
 ### Anvil Scripting Configuration
 

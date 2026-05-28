@@ -75,11 +75,13 @@ def run_anvil_acp_server(
 
 
 def _anvil_subprocess_env() -> dict[str, str]:
-    """Build Anvil's environment without forwarding GitHub token variables."""
-    env = os.environ.copy()
-    for key in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"):
-        env.pop(key, None)
-    return env
+    """Build Anvil's environment without forwarding sensitive auth variables."""
+    sensitive_markers = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not any(marker in key.upper() for marker in sensitive_markers)
+    }
 
 
 def resolve_anvil_binary(

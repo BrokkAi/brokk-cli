@@ -17,6 +17,8 @@ This project no longer launches the Java executor or JBang.
 - ACP mode (`brokk acp`) launches Anvil directly over stdio.
 - MCP mode (`brokk mcp`) launches Bifrost directly over stdio.
 - Headless commands (`exec`, `issue`, `pr`, `commit`) submit ACP prompts to Anvil through the Python ACP SDK.
+- For commands that touch GitHub, Anvil is only used to generate text. The Python CLI performs the actual `gh` calls and must validate that the expected issue, comment, review, or pull request was created.
+- Do not add GitHub credential environment variable names, credential flags, or credential forwarding logic anywhere in this repository. GitHub authentication belongs to the `gh` CLI/configuration, and Anvil must not receive GitHub auth environment.
 - For ACP mode startup, use `wait_live()`/`wait_ready()` only as a liveness probe; it no longer depends on session preload.
 - In ACP mode, do NOT emit context snapshots after prompt completion. This feature was removed because inconsistent Markdown and data URI support across ACP clients (e.g., IntelliJ vs. Zed) led to poor rendering of token bars and resource blocks.
 

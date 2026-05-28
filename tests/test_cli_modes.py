@@ -902,30 +902,6 @@ def test_main_issue_create_missing_prompt_exits_nonzero(monkeypatch, tmp_path) -
     assert exc.value.code != 0
 
 
-def test_main_issue_create_rejects_github_token_flag(monkeypatch) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "issue",
-            "create",
-            "Broken build",
-            "--github-token",
-            "ghp_123",
-            "--repo-owner",
-            "acme",
-            "--repo-name",
-            "tools",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
-
-    assert exc.value.code == 2
-
-
 def test_main_issue_solve_validation_invalid_owner(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         sys,
@@ -952,7 +928,7 @@ def test_main_issue_solve_validation_invalid_owner(monkeypatch, capsys) -> None:
     assert "^[A-Za-z0-9_.-]+$" in err
 
 
-def test_main_issue_create_ignores_env_github_token(monkeypatch, tmp_path) -> None:
+def test_main_issue_create_does_not_add_auth_tags(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
     temp_workspace = tmp_path / "temp-create-env"
     temp_workspace.mkdir()
@@ -968,7 +944,6 @@ def test_main_issue_create_ignores_env_github_token(monkeypatch, tmp_path) -> No
 
     monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
     monkeypatch.setattr(main_module, "_temporary_issue_repo_checkout", fake_temp_checkout)
-    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -986,8 +961,8 @@ def test_main_issue_create_ignores_env_github_token(monkeypatch, tmp_path) -> No
 
     main_module.main()
 
-    assert "github_token" not in captured["kwargs"]["tags"]
-    assert "github_token" not in captured["checkout_kwargs"]
+    assert "credential" not in captured["kwargs"]["tags"]
+    assert "credential" not in captured["checkout_kwargs"]
     assert captured["kwargs"]["workspace_dir"] == temp_workspace
     assert captured["kwargs"]["model"] is None
     assert captured["kwargs"]["reasoning_effort"] is None

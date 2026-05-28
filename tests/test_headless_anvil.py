@@ -87,14 +87,12 @@ def test_build_commit_prompt_includes_contract_and_message() -> None:
     assert "commit" in prompt.lower()
 
 
-def test_headless_anvil_env_preserves_github_auth_tokens(monkeypatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "secret")
-    monkeypatch.setenv("GH_TOKEN", "secret")
+def test_headless_anvil_env_strips_sensitive_auth_tokens(monkeypatch) -> None:
+    monkeypatch.setenv("BROKK_TEST_SECRET", "secret")
 
     env = headless_anvil_module._anvil_subprocess_env()
 
-    assert env["GITHUB_TOKEN"] == "secret"
-    assert env["GH_TOKEN"] == "secret"
+    assert "BROKK_TEST_SECRET" not in env
 
 
 def test_build_pr_create_prompt_includes_contract_and_branches() -> None:
