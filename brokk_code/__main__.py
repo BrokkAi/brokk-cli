@@ -492,6 +492,57 @@ def _run_issue_command(
         )
 
 
+def _run_issue_solve_command(args: argparse.Namespace) -> None:
+    """Run issue solve with Python-owned git/GitHub side effects."""
+    command_name = "issue solve"
+    _validate_github_params(args.repo_owner, args.repo_name, command_name)
+    tags: dict[str, str] = {
+        "repo_owner": args.repo_owner,
+        "repo_name": args.repo_name,
+        "issue_number": str(args.issue_number),
+    }
+    if args.build_settings:
+        tags["build_settings"] = args.build_settings
+    selection = resolve_anvil_selection(
+        tool_key="issue_solve",
+        model_override=args.model,
+        reasoning_override=args.reasoning_effort,
+        workspace_dir=Path(args.workspace).resolve(),
+        anvil_binary=args.anvil_binary,
+        anvil_version=args.anvil_version,
+    )
+
+    with _temporary_issue_repo_checkout(
+        repo_owner=args.repo_owner,
+        repo_name=args.repo_name,
+        action_label="Issue solve",
+    ) as issue_workspace_path:
+        issue_context = _fetch_github_issue_context(
+            repo_owner=args.repo_owner,
+            repo_name=args.repo_name,
+            issue_number=args.issue_number,
+            cwd=issue_workspace_path,
+        )
+        tags["issue_context"] = issue_context
+        asyncio.run(
+            run_issue_solve(
+                workspace_dir=issue_workspace_path,
+                issue_number=args.issue_number,
+                repo_owner=args.repo_owner,
+                repo_name=args.repo_name,
+                issue_context=issue_context,
+                tags=tags,
+                model=selection.model,
+                reasoning_effort=selection.reasoning_effort,
+                skip_verification=args.skip_verification,
+                max_issue_fix_attempts=args.max_issue_fix_attempts,
+                verbose=args.verbose,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
+            )
+        )
+
+
 @contextlib.contextmanager
 def _temporary_issue_repo_checkout(
     *,
@@ -752,6 +803,31 @@ def _fetch_github_issue_context(
             out.append(str(comment_body))
             out.append("")
     return "\n".join(out).strip()
+
+
+def _issue_solve_branch_name(issue_number: int) -> str:
+    return f"brokk/issue-{issue_number}-{uuid.uuid4().hex[:8]}"
+
+
+def _issue_title_from_context(issue_context: str, issue_number: int) -> str:
+    marker = f"# GitHub Issue #{issue_number}:"
+    for line in issue_context.splitlines():
+        if not line.startswith(marker):
+            continue
+        return line.removeprefix(marker).strip()
+    return ""
+
+
+def _issue_solve_pr_title(issue_context: str, issue_number: int) -> str:
+    issue_title = _issue_title_from_context(issue_context, issue_number)
+    return f"Fix {issue_title}" if issue_title else f"Fix issue #{issue_number}"
+
+
+def _issue_solve_pr_body(issue_number: int) -> str:
+    return f"""Fixes #{issue_number}
+
+Implemented by `brokk issue solve`.
+""".strip()
 
 
 def _create_github_pr(
@@ -1231,6 +1307,72 @@ async def run_commit(
     except Exception as e:
         print(f"Unexpected error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+async def run_issue_solve(
+    *,
+    workspace_dir: Path,
+    issue_number: int,
+    repo_owner: str,
+    repo_name: str,
+    issue_context: str,
+    tags: dict[str, str],
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    skip_verification: bool | None = None,
+    max_issue_fix_attempts: int | None = None,
+    verbose: bool = False,
+    anvil_binary: Path | None = None,
+    anvil_version: str = BUNDLED_ANVIL_VERSION,
+) -> None:
+    """Solve an issue with Anvil changes and Python-owned git/GitHub operations."""
+    initial_head = _git_head(workspace_dir)
+    if not initial_head:
+        _die("unable to inspect git HEAD for issue solve")
+
+    branch_name = _issue_solve_branch_name(issue_number)
+    _run_git(workspace_dir, "checkout", "-b", branch_name)
+
+    await run_headless_job(
+        workspace_dir=workspace_dir,
+        task_input=f"Resolve GitHub Issue #{issue_number}",
+        model=model,
+        reasoning_effort=reasoning_effort,
+        skip_verification=skip_verification,
+        max_issue_fix_attempts=max_issue_fix_attempts,
+        verbose=verbose,
+        mode="ISSUE",
+        tags=tags,
+        anvil_binary=anvil_binary,
+        anvil_version=anvil_version,
+    )
+
+    status = _git_status_porcelain(workspace_dir)
+    if status is None:
+        _die("unable to inspect git status for issue solve")
+    if not status:
+        _die("issue solve did not produce any file changes")
+
+    _run_git(workspace_dir, "add", "-A")
+    staged = _git_output(workspace_dir, "diff", "--cached", "--name-only")
+    if not staged:
+        _die("no staged changes remain after git add")
+
+    commit_message = f"Fix issue #{issue_number}"
+    _run_git(workspace_dir, "commit", "-m", commit_message)
+    current_head = _git_head(workspace_dir)
+    if not current_head or current_head == initial_head:
+        _die("git commit did not create a new commit")
+
+    _run_git(workspace_dir, "push", "-u", "origin", branch_name)
+    pr_url = _create_github_pr(
+        title=_issue_solve_pr_title(issue_context, issue_number),
+        body=_issue_solve_pr_body(issue_number),
+        base_branch=None,
+        head_branch=branch_name,
+        cwd=workspace_dir,
+    )
+    print(f"Issue solve pull request created: {pr_url}")
 
 
 async def _derive_pr_create_text(
@@ -2163,18 +2305,7 @@ def _main_dispatch(
             return
 
         if args.issue_command == "solve":
-            _run_issue_command(
-                args,
-                command_name="issue solve",
-                mode="ISSUE",
-                task_input=f"Resolve GitHub Issue #{args.issue_number}",
-                action_label="Issue solve",
-                include_issue_number=True,
-                skip_verification=args.skip_verification,
-                max_issue_fix_attempts=args.max_issue_fix_attempts,
-                build_settings=args.build_settings,
-                tool_key="issue_solve",
-            )
+            _run_issue_solve_command(args)
             return
 
 
