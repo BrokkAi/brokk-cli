@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -132,6 +133,46 @@ def _git_head(workspace_dir: Path) -> str | None:
 
 def _git_status_porcelain(workspace_dir: Path) -> str | None:
     return _git_output(workspace_dir, "status", "--porcelain")
+
+
+def _clean_generated_commit_message(text: str) -> str:
+    """Normalize common LLM wrappers around an intended commit message."""
+    message = text.strip()
+    if not message:
+        return ""
+
+    fence_match = re.fullmatch(r"```(?:[A-Za-z0-9_-]+)?\s*\n?(.*?)\n?```", message, re.DOTALL)
+    if fence_match:
+        message = fence_match.group(1).strip()
+
+    try:
+        command_parts = shlex.split(message)
+    except ValueError:
+        command_parts = []
+    if len(command_parts) >= 4 and command_parts[:2] == ["git", "commit"]:
+        commit_message_parts: list[str] = []
+        index = 2
+        while index < len(command_parts):
+            part = command_parts[index]
+            if part in {"-m", "--message"} and index + 1 < len(command_parts):
+                commit_message_parts.append(command_parts[index + 1])
+                index += 2
+                continue
+            index += 1
+        if commit_message_parts:
+            message = "\n\n".join(commit_message_parts).strip()
+
+    label_match = re.match(
+        r"(?is)^(?:commit\s+message|message|here(?:'s| is) the commit message)\s*:\s*(.+)$",
+        message,
+    )
+    if label_match:
+        message = label_match.group(1).strip()
+
+    if len(message) >= 2 and message[0] == message[-1] and message[0] in {'"', "'"}:
+        message = message[1:-1].strip()
+
+    return message
 
 
 def _run_git(workspace_dir: Path, *args: str) -> str:
@@ -1199,7 +1240,7 @@ async def run_commit(
 
         commit_message = (message or "").strip()
         if not commit_message:
-            commit_message = await _run_anvil_text_prompt(
+            generated_message = await _run_anvil_text_prompt(
                 workspace_dir=workspace_dir,
                 prompt=build_commit_prompt(message=None),
                 model=model,
@@ -1209,6 +1250,7 @@ async def run_commit(
                 progress_label="commit message",
                 verbose=verbose,
             )
+            commit_message = _clean_generated_commit_message(generated_message)
         if not commit_message:
             _die("Anvil did not return a commit message")
 
@@ -2057,20 +2099,26 @@ def _main_dispatch(
         return
 
     if args.command == "commit":
-        selection = resolve_anvil_selection(
-            tool_key="commit",
-            model_override=args.model,
-            reasoning_override=args.reasoning_effort,
-            workspace_dir=workspace_path,
-            anvil_binary=args.anvil_binary,
-            anvil_version=args.anvil_version,
-        )
+        workspace_path = resolve_workspace_dir(workspace_path)
+        model = args.model
+        reasoning_effort = args.reasoning_effort
+        if not (args.message or "").strip():
+            selection = resolve_anvil_selection(
+                tool_key="commit",
+                model_override=args.model,
+                reasoning_override=args.reasoning_effort,
+                workspace_dir=workspace_path,
+                anvil_binary=args.anvil_binary,
+                anvil_version=args.anvil_version,
+            )
+            model = selection.model
+            reasoning_effort = selection.reasoning_effort
         asyncio.run(
             run_commit(
                 workspace_dir=workspace_path,
                 message=args.message,
-                model=selection.model,
-                reasoning_effort=selection.reasoning_effort,
+                model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=args.verbose,
                 anvil_binary=args.anvil_binary,
                 anvil_version=args.anvil_version,
