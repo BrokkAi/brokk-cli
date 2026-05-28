@@ -64,7 +64,7 @@ installer supports it.
 Run Anvil as an ACP server over stdio:
 
 ```bash
-uvx brokk acp --workspace .
+uvx brokk acp
 ```
 
 Resolution order for Anvil is:
@@ -76,17 +76,20 @@ Resolution order for Anvil is:
 Useful ACP options:
 
 ```bash
-uvx brokk acp --workspace . --default-model gpt-5.2
-uvx brokk acp --workspace . --max-turns 20
-uvx brokk acp --workspace . --bifrost-binary /path/to/bifrost
+uvx brokk acp --default-model gpt-5.2
+uvx brokk acp --max-turns 20
+uvx brokk acp --bifrost-binary /path/to/bifrost
+uvx brokk acp --help
 ```
+
+Unknown `brokk acp` arguments are passed through to Anvil.
 
 ## MCP Server
 
 Run Bifrost as an MCP server over stdio:
 
 ```bash
-uvx brokk mcp --workspace .
+uvx brokk mcp
 ```
 
 Resolution order for Bifrost is:
@@ -265,7 +268,6 @@ commands as one-off overrides.
 
 Common runtime options:
 
-- `--workspace <path>`: workspace directory, defaulting to the current directory.
 - `--worktree`: run the command in an isolated git worktree when applicable.
 - `--anvil-binary <path>`: use a specific Anvil binary.
 - `--anvil-version <version>`: use a specific Anvil release version.

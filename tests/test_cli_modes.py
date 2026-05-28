@@ -260,6 +260,17 @@ def test_main_without_command_prints_help(monkeypatch, capsys) -> None:
     assert "Launch the interactive app" not in captured.out
 
 
+def test_main_help_does_not_show_legacy_workspace(monkeypatch, capsys) -> None:
+    removed_flag = "--" + "workspace"
+    monkeypatch.setattr(sys, "argv", ["brokk", "--help"])
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main()
+
+    assert exc.value.code == 0
+    assert removed_flag not in capsys.readouterr().out
+
+
 def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
 
@@ -267,14 +278,13 @@ def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "brokk",
             "acp",
-            "--workspace",
-            str(tmp_path),
             "--default-model",
             "claude-haiku-4-5",
             "--bifrost-binary",
@@ -291,6 +301,34 @@ def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
         "claude-haiku-4-5",
         "--bifrost-binary",
         "/opt/bifrost",
+    ]
+
+
+def test_main_acp_forwards_unknown_args_as_anvil_passthrough(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "acp",
+            "--help",
+            "--future-anvil-flag",
+            "value",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--help",
+        "--future-anvil-flag",
+        "value",
     ]
 
 
@@ -325,7 +363,7 @@ def test_main_acp_native_command_is_removed(monkeypatch, tmp_path, capsys) -> No
     monkeypatch.setattr(
         sys,
         "argv",
-        ["brokk", "acp-native", "--workspace", str(tmp_path)],
+        ["brokk", "acp-native"],
     )
 
     with pytest.raises(SystemExit) as excinfo:
@@ -346,14 +384,13 @@ def test_main_mcp_routes_to_bifrost_launcher(monkeypatch, tmp_path) -> None:
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "brokk",
             "mcp",
-            "--workspace",
-            str(tmp_path),
             "--bifrost-binary",
             str(binary),
             "--debug",
@@ -394,14 +431,13 @@ def test_main_mcp_forwards_unknown_args_as_passthrough(monkeypatch, tmp_path) ->
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "brokk",
             "mcp",
-            "--workspace",
-            str(tmp_path),
             "--help",
             "--custom-flag",
             "value",
@@ -447,16 +483,11 @@ def test_main_exec_resolves_workspace_to_repo_root(monkeypatch, tmp_path) -> Non
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
+    monkeypatch.chdir(nested_workspace)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "exec",
-            "--workspace",
-            str(nested_workspace),
-            "Fix the bug",
-        ],
+        ["brokk", "exec", "Fix the bug"],
     )
 
     main_module.main()
@@ -474,14 +505,13 @@ def test_main_acp_accepts_legacy_ide_flag_but_ignores_it(monkeypatch, tmp_path) 
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "brokk",
             "acp",
-            "--workspace",
-            str(tmp_path),
             "--ide",
             "zed",
         ],
@@ -494,17 +524,28 @@ def test_main_acp_accepts_legacy_ide_flag_but_ignores_it(monkeypatch, tmp_path) 
     assert "zed" not in captured["kwargs"]["passthrough_args"]
 
 
-def test_main_acp_rejects_extra_positional(monkeypatch, tmp_path) -> None:
+def test_main_acp_forwards_extra_positional_to_anvil(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["brokk", "acp", "zed", "--workspace", str(tmp_path)],
+        ["brokk", "acp", "zed", "--future-anvil-flag", str(tmp_path)],
     )
 
-    with pytest.raises(SystemExit) as exc:
-        main_module.main()
+    main_module.main()
 
-    assert exc.value.code == 2
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "zed",
+        "--future-anvil-flag",
+        str(tmp_path),
+    ]
 
 
 def test_main_install_zed_routes_to_installer(monkeypatch, tmp_path, capsys) -> None:
@@ -973,6 +1014,7 @@ def test_main_issue_create_routes_correctly(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(main_module, "run_headless_job", fake_run_headless_job)
     monkeypatch.setattr(main_module, "_temporary_issue_repo_checkout", fake_temp_checkout)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -981,8 +1023,6 @@ def test_main_issue_create_routes_correctly(monkeypatch, tmp_path) -> None:
             "issue",
             "create",
             "Broken build",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -1630,6 +1670,7 @@ def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
     )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1639,8 +1680,6 @@ def test_main_issue_diagnose_routes_correctly(monkeypatch, tmp_path) -> None:
             "diagnose",
             "--issue-number",
             "456",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -1682,6 +1721,7 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
     )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1691,8 +1731,6 @@ def test_main_issue_solve_routes_correctly(monkeypatch, tmp_path) -> None:
             "solve",
             "--issue-number",
             "123",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -1743,6 +1781,7 @@ def test_main_issue_solve_temp_workspace_cleanup_on_keyboard_interrupt(
     monkeypatch.setattr(
         main_module, "_fetch_github_issue_context", lambda **_kwargs: "issue context"
     )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1752,8 +1791,6 @@ def test_main_issue_solve_temp_workspace_cleanup_on_keyboard_interrupt(
             "solve",
             "--issue-number",
             "123",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -2137,6 +2174,7 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_pr_create", fake_run_pr_create)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2144,8 +2182,6 @@ def test_main_pr_create_routes_correctly(monkeypatch, tmp_path) -> None:
             "brokk",
             "pr",
             "create",
-            "--workspace",
-            str(tmp_path),
             "--title",
             "My PR Title",
             "--body",
@@ -2184,16 +2220,11 @@ def test_main_pr_create_omitted_title_body_routes_correctly(monkeypatch, tmp_pat
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_pr_create", fake_run_pr_create)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "pr",
-            "create",
-            "--workspace",
-            str(tmp_path),
-        ],
+        ["brokk", "pr", "create"],
     )
 
     main_module.main()
@@ -2205,10 +2236,11 @@ def test_main_pr_create_omitted_title_body_routes_correctly(monkeypatch, tmp_pat
 
 
 def test_main_pr_create_missing_subcommand_exits_nonzero(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["brokk", "pr", "--workspace", str(tmp_path)],
+        ["brokk", "pr"],
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -2361,6 +2393,7 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2368,8 +2401,6 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
             "brokk",
             "commit",
             "Fix the bug",
-            "--workspace",
-            str(tmp_path),
             "--model",
             "gpt-test",
             "--reasoning-effort",
@@ -2400,16 +2431,11 @@ def test_main_commit_with_explicit_message_skips_anvil_selection(monkeypatch, tm
 
     monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
     monkeypatch.setattr(main_module, "resolve_anvil_selection", fail_resolve_anvil_selection)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "commit",
-            "Fix the bug",
-            "--workspace",
-            str(tmp_path),
-        ],
+        ["brokk", "commit", "Fix the bug"],
     )
 
     main_module.main()
@@ -2431,16 +2457,11 @@ def test_main_commit_resolves_workspace_to_repo_root(monkeypatch, tmp_path) -> N
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
+    monkeypatch.chdir(nested_workspace)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "commit",
-            "Fix the bug",
-            "--workspace",
-            str(nested_workspace),
-        ],
+        ["brokk", "commit", "Fix the bug"],
     )
 
     main_module.main()
@@ -2457,15 +2478,11 @@ def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "commit",
-            "--workspace",
-            str(tmp_path),
-        ],
+        ["brokk", "commit"],
     )
 
     main_module.main()
@@ -2493,15 +2510,11 @@ def test_main_commit_uses_anvil_config_when_flags_omitted(monkeypatch, tmp_path)
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_commit", fake_run_commit)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "commit",
-            "--workspace",
-            str(tmp_path),
-        ],
+        ["brokk", "commit"],
     )
 
     main_module.main()
@@ -2668,6 +2681,7 @@ def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2677,8 +2691,6 @@ def test_main_pr_review_routes_correctly(monkeypatch, tmp_path) -> None:
             "review",
             "--pr-number",
             "42",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "acme",
             "--repo-name",
@@ -2728,6 +2740,7 @@ def test_main_pr_review_missing_repo_owner_without_inference_exits_nonzero(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setattr(main_module, "infer_github_repo_from_remote", lambda _: (None, None))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2737,8 +2750,6 @@ def test_main_pr_review_missing_repo_owner_without_inference_exits_nonzero(
             "review",
             "--pr-number",
             "42",
-            "--workspace",
-            str(tmp_path),
             "--repo-name",
             "tools",
         ],
@@ -2754,6 +2765,7 @@ def test_main_pr_review_missing_repo_name_without_inference_exits_nonzero(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setattr(main_module, "infer_github_repo_from_remote", lambda _: (None, None))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2763,8 +2775,6 @@ def test_main_pr_review_missing_repo_name_without_inference_exits_nonzero(
             "review",
             "--pr-number",
             "42",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "acme",
         ],
@@ -2793,18 +2803,11 @@ def test_main_pr_review_infers_repo_from_https_remote(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "pr",
-            "review",
-            "--pr-number",
-            "42",
-            "--workspace",
-            str(tmp_path),
-        ],
+        ["brokk", "pr", "review", "--pr-number", "42"],
     )
 
     main_module.main()
@@ -2831,18 +2834,11 @@ def test_main_pr_review_infers_repo_from_ssh_remote(monkeypatch, tmp_path) -> No
 
     monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "brokk",
-            "pr",
-            "review",
-            "--pr-number",
-            "42",
-            "--workspace",
-            str(tmp_path),
-        ],
+        ["brokk", "pr", "review", "--pr-number", "42"],
     )
 
     main_module.main()
@@ -2869,6 +2865,7 @@ def test_main_pr_review_explicit_params_override_inference(monkeypatch, tmp_path
 
     monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2878,8 +2875,6 @@ def test_main_pr_review_explicit_params_override_inference(monkeypatch, tmp_path
             "review",
             "--pr-number",
             "42",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "explicit-owner",
             "--repo-name",
@@ -2902,6 +2897,7 @@ def test_main_pr_review_uses_default_anvil_model(monkeypatch, tmp_path) -> None:
         captured["ran"] = True
 
     monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2911,8 +2907,6 @@ def test_main_pr_review_uses_default_anvil_model(monkeypatch, tmp_path) -> None:
             "review",
             "--pr-number",
             "42",
-            "--workspace",
-            str(tmp_path),
             "--repo-owner",
             "acme",
             "--repo-name",

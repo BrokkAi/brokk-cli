@@ -378,12 +378,6 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
         help="Create an isolated git worktree for this session and clean up on exit if no changes",
     )
     parser.add_argument(
-        "--workspace",
-        type=str,
-        default=".",
-        help="Path to the workspace directory (default: current directory)",
-    )
-    parser.add_argument(
         "--anvil-binary",
         type=Path,
         default=None,
@@ -406,12 +400,6 @@ def _add_acp_runtime_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Create an isolated git worktree for this session and clean up on exit if no changes",
-    )
-    parser.add_argument(
-        "--workspace",
-        type=str,
-        default=".",
-        help="Path to the workspace directory (default: current directory)",
     )
     parser.add_argument(
         "--anvil-binary",
@@ -457,7 +445,9 @@ def _add_acp_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _build_anvil_passthrough_args(args: argparse.Namespace) -> list[str]:
+def _build_anvil_passthrough_args(
+    args: argparse.Namespace, unknown_args: list[str] | None = None
+) -> list[str]:
     passthrough: list[str] = []
     if args.default_model:
         passthrough.extend(["--default-model", args.default_model])
@@ -469,6 +459,8 @@ def _build_anvil_passthrough_args(args: argparse.Namespace) -> list[str]:
         passthrough.extend(["--llm-idle-timeout-secs", str(args.llm_idle_timeout_secs)])
     if args.no_wasm_sandbox:
         passthrough.append("--no-wasm-sandbox")
+    if unknown_args:
+        passthrough.extend(unknown_args)
     return passthrough
 
 
@@ -499,7 +491,7 @@ def _run_issue_command(
         tool_key=tool_key,
         model_override=args.model,
         reasoning_override=args.reasoning_effort,
-        workspace_dir=Path(args.workspace).resolve(),
+        workspace_dir=Path.cwd().resolve(),
         anvil_binary=args.anvil_binary,
         anvil_version=args.anvil_version,
     )
@@ -548,7 +540,7 @@ def _run_issue_solve_command(args: argparse.Namespace) -> None:
         tool_key="issue_solve",
         model_override=args.model,
         reasoning_override=args.reasoning_effort,
-        workspace_dir=Path(args.workspace).resolve(),
+        workspace_dir=Path.cwd().resolve(),
         anvil_binary=args.anvil_binary,
         anvil_version=args.anvil_version,
     )
@@ -989,7 +981,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    acp_parser = subparsers.add_parser("acp", help="Run Anvil in ACP server mode")
+    acp_parser = subparsers.add_parser(
+        "acp",
+        help="Run Anvil in ACP server mode",
+        add_help=False,
+    )
     _add_acp_runtime_args(acp_parser)
     acp_parser.add_argument(
         "--ide",
@@ -1004,12 +1000,6 @@ def _build_parser() -> argparse.ArgumentParser:
     anvil_config_parser = subparsers.add_parser(
         "anvil-config",
         help="Configure model settings for Anvil-backed scripting commands",
-    )
-    anvil_config_parser.add_argument(
-        "--workspace",
-        type=str,
-        default=".",
-        help="Path to use when querying Anvil options (default: current directory)",
     )
     anvil_config_parser.add_argument(
         "--anvil-binary",
@@ -1884,14 +1874,14 @@ def main():
     parser = _build_parser()
     args, unknown = parser.parse_known_args()
 
-    if unknown and args.command != "mcp":
+    if unknown and args.command not in {"acp", "mcp"}:
         parser.error(f"unrecognized arguments: {' '.join(unknown)}")
 
     if args.command is None:
         parser.print_help()
         return
 
-    workspace_path = Path(args.workspace).resolve()
+    workspace_path = Path.cwd().resolve()
 
     use_worktree = getattr(args, "worktree", False) and args.command not in _NON_WORKSPACE_COMMANDS
     if use_worktree:
@@ -2198,7 +2188,7 @@ def _main_dispatch(
             workspace_dir=workspace_path,
             binary_override=args.anvil_binary,
             version=args.anvil_version,
-            passthrough_args=_build_anvil_passthrough_args(args),
+            passthrough_args=_build_anvil_passthrough_args(args, unknown),
         )
         return
 
