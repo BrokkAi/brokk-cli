@@ -1,9 +1,4 @@
-"""Launch the bifrost (Rust) MCP server as a subcommand of `brokk`.
-
-bifrost is a native binary; this module mirrors the workspace-resolution
-behavior of `mcp_launcher` and execs the binary in place so stdio passes
-through cleanly to the MCP client.
-"""
+"""Launch the bifrost MCP server as a subcommand of `brokk`."""
 
 from __future__ import annotations
 
@@ -12,12 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from brokk_code.mcp_launcher import resolve_mcp_workspace_dir
 from brokk_code.rust_acp_install import (
     BifrostInstallError,
     RustAcpInstallError,
     resolve_bifrost_binary,
 )
+from brokk_code.workspace import resolve_workspace_dir
 
 
 def run_bifrost_server(
@@ -32,7 +27,7 @@ def run_bifrost_server(
     child since execvpe loses stdout. Extra positional args from the CLI are
     forwarded after the fixed `--server searchtools` flag.
     """
-    resolved_workspace_dir = resolve_mcp_workspace_dir(workspace_dir)
+    resolved_workspace_dir = resolve_workspace_dir(workspace_dir)
 
     try:
         bifrost_bin = resolve_bifrost_binary(override=binary_override)

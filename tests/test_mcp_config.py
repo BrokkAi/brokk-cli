@@ -5,7 +5,6 @@ from unittest.mock import patch
 import pytest
 
 from brokk_code.mcp_config import (
-    _fetch_github_file,
     configure_claude_code_mcp_settings,
     configure_codex_mcp_settings,
     install_claude_mcp_summaries_skill,
@@ -18,10 +17,24 @@ from brokk_code.zed_config import ExistingBrokkCodeEntryError
 
 
 def _mock_fetch_github_file(path: str) -> str:
-    # Pre-extraction this read from the monorepo's sibling claude-plugin/ dir.
-    # brokk-cli is standalone, so delegate to the production HTTP fetch that
-    # pulls claude-plugin/* from BrokkAi/brokk@master.
-    return _fetch_github_file(path)
+    if path == "claude-plugin/.claude-plugin/plugin.json":
+        return json.dumps(
+            {
+                "name": "brokk",
+                "skills": "./skills/",
+                "mcpServers": "./.mcp.json",
+                "agents": "./agents/",
+            }
+        )
+    if path == "claude-plugin/.mcp.json":
+        return json.dumps({"mcpServers": {}})
+    if path.startswith("claude-plugin/agents/") and path.endswith(".md"):
+        agent_name = path.removeprefix("claude-plugin/agents/").removesuffix(".md")
+        return f"{agent_name} prompt"
+    if path.startswith("claude-plugin/skills/") and path.endswith("/SKILL.md"):
+        skill_name = path.removeprefix("claude-plugin/skills/").removesuffix("/SKILL.md")
+        return f"---\nname: brokk-{skill_name}\n---\n# {skill_name}\n"
+    raise AssertionError(f"Unexpected GitHub fetch path: {path}")
 
 
 def test_configure_claude_code_mcp_settings_uses_claude_json(tmp_path, monkeypatch):

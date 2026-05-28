@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from brokk_code import bifrost_launcher, mcp_launcher, rust_acp_install
+from brokk_code import bifrost_launcher, rust_acp_install
 
 
 def test_run_bifrost_server_uses_override_and_execs_searchtools(monkeypatch, tmp_path) -> None:
@@ -28,8 +28,6 @@ def test_run_bifrost_server_uses_override_and_execs_searchtools(monkeypatch, tmp
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "chdir", fake_chdir)
     monkeypatch.setattr(os, "execvpe", fake_execvpe)
-    monkeypatch.setattr(mcp_launcher, "git_toplevel_for", lambda _path: None)
-
     with pytest.raises(RuntimeError, match="stop"):
         bifrost_launcher.run_bifrost_server(
             workspace_dir=tmp_path,
@@ -61,8 +59,6 @@ def test_run_bifrost_server_forwards_passthrough_args(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "chdir", lambda _p: None)
     monkeypatch.setattr(os, "execvpe", fake_execvpe)
-    monkeypatch.setattr(mcp_launcher, "git_toplevel_for", lambda _path: None)
-
     with pytest.raises(RuntimeError, match="stop"):
         bifrost_launcher.run_bifrost_server(
             workspace_dir=tmp_path,
@@ -81,8 +77,6 @@ def test_run_bifrost_server_reports_install_error(monkeypatch, tmp_path, capsys)
         raise rust_acp_install.BifrostInstallError("no asset for platform")
 
     monkeypatch.setattr(bifrost_launcher, "resolve_bifrost_binary", fake_resolve)
-    monkeypatch.setattr(mcp_launcher, "git_toplevel_for", lambda _path: None)
-
     with pytest.raises(SystemExit) as excinfo:
         bifrost_launcher.run_bifrost_server(
             workspace_dir=tmp_path,

@@ -12,15 +12,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
-from rich.console import Console
-
 from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, run_anvil_acp_server
 from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
-from brokk_code.executor import ExecutorError
 from brokk_code.git_utils import infer_github_repo_from_remote
 from brokk_code.headless_anvil import (
     HeadlessAcpClient,
+    HeadlessAnvilError,
     build_commit_prompt,
     build_headless_prompt,
     build_pr_create_prompt,
@@ -82,11 +80,10 @@ def _resolve_neovim_plugin(*, plugin: str | None) -> str:
     if not sys.stdin.isatty():
         return "codecompanion"
 
-    console = Console()
-    console.print("Choose a Neovim plugin integration:")
-    console.print("1) CodeCompanion (ACP adapter)")
-    console.print("2) Avante (ACP provider)")
-    choice = console.input("Selection [1/2] (default: 1): ").strip().lower()
+    print("Choose a Neovim plugin integration:")
+    print("1) CodeCompanion (ACP adapter)")
+    print("2) Avante (ACP provider)")
+    choice = input("Selection [1/2] (default: 1): ").strip().lower()
     if choice in {"", "1", "codecompanion"}:
         return "codecompanion"
     if choice in {"2", "avante"}:
@@ -126,7 +123,7 @@ def _add_github_issue_args(
         "--verbose",
         action="store_true",
         default=False,
-        help="Show full headless executor output (events/tokens) for debugging",
+        help="Show full Anvil ACP output (events/tokens) for debugging",
     )
 
 
@@ -176,40 +173,6 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
         help="Path to the workspace directory (default: current directory)",
     )
     parser.add_argument(
-        "--vendor",
-        type=str,
-        choices=["Default", "Anthropic", "Gemini", "OpenAI", "OpenAI - Codex"],
-        default=None,
-        help=(
-            "Set 'Other Models' vendor preference (affects internal roles like "
-            "summarize/scan/commit). Use 'Default' to clear overrides."
-        ),
-    )
-    parser.add_argument(
-        "--jar",
-        type=str,
-        default=None,
-        help="Path to brokk.jar for Java executor commands",
-    )
-    parser.add_argument(
-        "--executor-version",
-        type=str,
-        default=None,
-        help="Executor version to use (default: bundled version)",
-    )
-    parser.add_argument(
-        "--executor-snapshot",
-        action="store_true",
-        default=True,
-        help="[Ignored] Java executor compatibility flag",
-    )
-    parser.add_argument(
-        "--executor-stable",
-        action="store_false",
-        dest="executor_snapshot",
-        help="[Ignored] Java executor compatibility flag",
-    )
-    parser.add_argument(
         "--anvil-binary",
         type=Path,
         default=None,
@@ -238,13 +201,6 @@ def _add_acp_runtime_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=".",
         help="Path to the workspace directory (default: current directory)",
-    )
-    parser.add_argument(
-        "--vendor",
-        type=str,
-        choices=["Default", "Anthropic", "Gemini", "OpenAI", "OpenAI - Codex"],
-        default=None,
-        help="[Deprecated] Ignored by the Anvil ACP server.",
     )
     parser.add_argument(
         "--anvil-binary",
@@ -307,7 +263,6 @@ def _build_anvil_passthrough_args(args: argparse.Namespace) -> list[str]:
 
 def _run_issue_command(
     args: argparse.Namespace,
-    jar_path: Path | None,
     command_name: str,
     mode: str,
     task_input: str,
@@ -352,10 +307,6 @@ def _run_issue_command(
                 verbose=args.verbose,
                 mode=mode,
                 tags=tags,
-                jar_path=jar_path,
-                executor_version=args.executor_version,
-                executor_snapshot=args.executor_snapshot,
-                vendor=args.vendor,
                 anvil_binary=args.anvil_binary,
                 anvil_version=args.anvil_version,
             )
@@ -696,7 +647,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--build-settings",
         type=str,
         default=None,
-        help="JSON string of build settings overrides (matching executor expectations)",
+        help="JSON string of build settings overrides",
     )
 
     # PR commands
@@ -780,7 +731,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         default=False,
-        help="Show full headless executor output (events/tokens) for debugging",
+        help="Show full Anvil ACP output (events/tokens) for debugging",
     )
 
     version_parser = subparsers.add_parser("version", help="Print version information")
@@ -792,16 +743,10 @@ def _build_parser() -> argparse.ArgumentParser:
 async def run_commit(
     workspace_dir: Path,
     message: str | None = None,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
     """Commits current changes via Anvil ACP."""
-    from brokk_code.executor import ExecutorError
-
     manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
@@ -848,7 +793,7 @@ async def run_commit(
             else:
                 print("Commit completed.")
 
-    except ExecutorError as e:
+    except HeadlessAnvilError as e:
         print(f"Anvil ACP error during commit: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
@@ -865,16 +810,10 @@ async def run_pr_create(
     base_branch: str | None = None,
     head_branch: str | None = None,
     github_token: str | None = None,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
     """Creates a pull request via Anvil ACP."""
-    from brokk_code.executor import ExecutorError
-
     manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
@@ -916,7 +855,7 @@ async def run_pr_create(
         else:
             print("Pull request created.")
 
-    except ExecutorError as e:
+    except HeadlessAnvilError as e:
         print(f"Anvil ACP error during PR create: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
@@ -935,16 +874,10 @@ async def run_pr_review_job(
     planner_model: str,
     severity_threshold: str | None = None,
     verbose: bool = False,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
     """Runs a PR review job via Anvil ACP and streams events to stdout."""
-    from brokk_code.executor import ExecutorError
-
     manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
@@ -1086,7 +1019,7 @@ async def run_pr_review_job(
         _clear_spinner()
         print(f"PR #{pr_number} review complete.")
 
-    except ExecutorError as e:
+    except HeadlessAnvilError as e:
         _clear_spinner()
         _update_shutdown_context()
         print(f"Anvil ACP error during PR review job ({stage}): {e}", file=sys.stderr)
@@ -1114,16 +1047,10 @@ async def run_headless_job(
     skip_verification: bool | None = None,
     max_issue_fix_attempts: int | None = None,
     verbose: bool = False,
-    jar_path: Path | None = None,
-    executor_version: str | None = None,
-    executor_snapshot: bool = True,
-    vendor: str | None = None,
     anvil_binary: Path | None = None,
     anvil_version: str = BUNDLED_ANVIL_VERSION,
 ) -> None:
     """Runs a non-interactive job via Anvil ACP and streams events to stdout."""
-    from brokk_code.executor import ExecutorError
-
     manager = HeadlessAcpClient(
         workspace_dir=workspace_dir,
         anvil_binary=anvil_binary,
@@ -1169,7 +1096,7 @@ async def run_headless_job(
             created_issue_url = match.group(0)
 
     def _record_issue_url_from_issue_writer_notification(message: str) -> None:
-        # Java executor success path emits:
+        # Legacy compatibility: older success events emitted:
         # "ISSUE_WRITER: issue created <id> <htmlUrl>"
         if created_issue_url or not message:
             return
@@ -1327,7 +1254,7 @@ async def run_headless_job(
         else:
             print("Job finished.")
 
-    except ExecutorError as e:
+    except HeadlessAnvilError as e:
         _clear_spinner()
         _update_shutdown_context()
         print(f"Anvil ACP error during {mode} job ({stage}): {e}", file=sys.stderr)
@@ -1369,9 +1296,7 @@ def main():
         parser.print_help()
         return
 
-    # Resolve paths early so they are available to all commands
     workspace_path = Path(args.workspace).resolve()
-    jar_path = Path(args.jar).resolve() if args.jar else None
 
     use_worktree = getattr(args, "worktree", False) and args.command not in _NON_WORKSPACE_COMMANDS
     if use_worktree:
@@ -1380,15 +1305,14 @@ def main():
         repo_root = resolve_workspace_dir(workspace_path)
         with worktree_context(repo_root) as wt_path:
             wt_workspace = _resolve_worktree_workspace_path(workspace_path, repo_root, wt_path)
-            _main_dispatch(args, wt_workspace, jar_path, unknown)
+            _main_dispatch(args, wt_workspace, unknown)
     else:
-        _main_dispatch(args, workspace_path, jar_path, unknown)
+        _main_dispatch(args, workspace_path, unknown)
 
 
 def _main_dispatch(
     args: argparse.Namespace,
     workspace_path: Path,
-    jar_path: Path | None,
     unknown: list[str],
 ) -> None:
     """Core command dispatch, extracted to support optional worktree wrapping."""
@@ -1668,7 +1592,7 @@ def _main_dispatch(
         except (ExistingBrokkCodeEntryError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        except (ExecutorError, UvSetupError) as exc:
+        except UvSetupError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
@@ -1722,13 +1646,6 @@ def _main_dispatch(
         return
 
     if args.command == "acp":
-        if jar_path is not None or args.executor_version is not None:
-            print(
-                "Error: `brokk acp` launches Anvil and does not support Java "
-                "--jar or --executor-version options.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
         run_anvil_acp_server(
             workspace_dir=workspace_path,
             binary_override=args.anvil_binary,
@@ -1738,14 +1655,6 @@ def _main_dispatch(
         return
 
     if args.command == "mcp":
-        if jar_path is not None or args.executor_version is not None:
-            print(
-                "Error: `brokk mcp` launches bifrost and does not support Java "
-                "--jar or --executor-version options.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
         from brokk_code.bifrost_launcher import run_bifrost_server
 
         bifrost_override = (
@@ -1771,10 +1680,6 @@ def _main_dispatch(
                 mode="LITE_AGENT",
                 tags={"mode": "LITE_AGENT"},
                 verbose=args.verbose,
-                jar_path=jar_path,
-                executor_version=args.executor_version,
-                executor_snapshot=args.executor_snapshot,
-                vendor=args.vendor,
                 anvil_binary=args.anvil_binary,
                 anvil_version=args.anvil_version,
             )
@@ -1786,10 +1691,6 @@ def _main_dispatch(
             run_commit(
                 workspace_dir=workspace_path,
                 message=args.message,
-                jar_path=jar_path,
-                executor_version=args.executor_version,
-                executor_snapshot=args.executor_snapshot,
-                vendor=args.vendor,
                 anvil_binary=args.anvil_binary,
                 anvil_version=args.anvil_version,
             )
@@ -1806,10 +1707,6 @@ def _main_dispatch(
                     base_branch=args.base,
                     head_branch=args.head,
                     github_token=args.github_token,
-                    jar_path=jar_path,
-                    executor_version=args.executor_version,
-                    executor_snapshot=args.executor_snapshot,
-                    vendor=args.vendor,
                     anvil_binary=args.anvil_binary,
                     anvil_version=args.anvil_version,
                 )
@@ -1836,10 +1733,6 @@ def _main_dispatch(
                     planner_model=args.planner_model,
                     severity_threshold=args.severity,
                     verbose=args.verbose,
-                    jar_path=jar_path,
-                    executor_version=args.executor_version,
-                    executor_snapshot=args.executor_snapshot,
-                    vendor=args.vendor,
                     anvil_binary=args.anvil_binary,
                     anvil_version=args.anvil_version,
                 )
@@ -1850,7 +1743,6 @@ def _main_dispatch(
         if args.issue_command == "create":
             _run_issue_command(
                 args,
-                jar_path,
                 command_name="issue create",
                 mode="ISSUE_WRITER",
                 task_input=args.prompt,
@@ -1861,7 +1753,6 @@ def _main_dispatch(
         if args.issue_command == "diagnose":
             _run_issue_command(
                 args,
-                jar_path,
                 command_name="issue diagnose",
                 mode="ISSUE_DIAGNOSE",
                 task_input=f"Diagnose GitHub Issue #{args.issue_number}",
@@ -1873,7 +1764,6 @@ def _main_dispatch(
         if args.issue_command == "solve":
             _run_issue_command(
                 args,
-                jar_path,
                 command_name="issue solve",
                 mode="ISSUE",
                 task_input=f"Resolve GitHub Issue #{args.issue_number}",

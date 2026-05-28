@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brokk_code import anvil_launcher, mcp_launcher
+from brokk_code import anvil_launcher
 
 
 def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_path) -> None:
@@ -27,8 +27,6 @@ def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_pa
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "chdir", fake_chdir)
     monkeypatch.setattr(os, "execvpe", fake_execvpe)
-    monkeypatch.setattr(mcp_launcher, "git_toplevel_for", lambda _path: None)
-
     with pytest.raises(RuntimeError, match="stop"):
         anvil_launcher.run_anvil_acp_server(
             workspace_dir=tmp_path,

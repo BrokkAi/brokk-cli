@@ -123,7 +123,7 @@ def test_main_without_command_prints_help(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "usage: brokk" in captured.out
     assert "acp" in captured.out
-    assert "Launch the interactive TUI" not in captured.out
+    assert "Launch the interactive app" not in captured.out
 
 
 def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
@@ -141,8 +141,6 @@ def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
             "acp",
             "--workspace",
             str(tmp_path),
-            "--vendor",
-            "Gemini",
             "--default-model",
             "claude-haiku-4-5",
             "--bifrost-binary",
@@ -174,73 +172,6 @@ def test_main_acp_native_command_is_removed(monkeypatch, tmp_path, capsys) -> No
 
     assert excinfo.value.code == 2
     assert "invalid choice" in capsys.readouterr().err.lower()
-
-
-def test_main_acp_rejects_java_runtime_options(monkeypatch, tmp_path, capsys) -> None:
-    """`brokk acp` launches Anvil and must not accept the Java executor path."""
-    captured: dict[str, Any] = {}
-    jar_path = tmp_path / "brokk.jar"
-    jar_path.write_text("dummy")
-
-    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "--jar",
-            str(jar_path),
-            "--executor-version",
-            "9.9.9",
-            "acp",
-            "--workspace",
-            str(tmp_path),
-        ],
-    )
-
-    with pytest.raises(SystemExit) as excinfo:
-        main_module.main()
-
-    assert excinfo.value.code == 1
-    assert captured == {}
-    assert "does not support java" in capsys.readouterr().err.lower()
-
-
-def test_main_mcp_rejects_java_runtime_options(monkeypatch, tmp_path, capsys) -> None:
-    captured: dict[str, Any] = {}
-    jar_path = tmp_path / "brokk.jar"
-    jar_path.write_text("dummy")
-
-    from brokk_code import bifrost_launcher as bifrost_launcher_module
-
-    def fake_run_bifrost_server(**kwargs: Any) -> None:
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "brokk",
-            "mcp",
-            "--workspace",
-            str(tmp_path),
-            "--jar",
-            str(jar_path),
-            "--executor-version",
-            "0.99.0",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as excinfo:
-        main_module.main()
-
-    assert excinfo.value.code == 1
-    assert captured == {}
-    assert "does not support java" in capsys.readouterr().err.lower()
 
 
 def test_main_mcp_routes_to_bifrost_launcher(monkeypatch, tmp_path) -> None:
@@ -633,13 +564,8 @@ def test_install_neovim_invalid_selection_skips_key_prompt(monkeypatch) -> None:
         def isatty(self) -> bool:
             return True
 
-    # Use a custom stream to satisfy Rich's Console detection and selection
     monkeypatch.setattr(sys, "stdin", FakeTtyInput(""))
-
-    # Patch rich.console.Console.input to return an invalid selection
-    from rich.console import Console
-
-    monkeypatch.setattr(Console, "input", lambda self, prompt="": "99")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "99")
 
     monkeypatch.setattr(sys, "argv", ["brokk", "install", "neovim"])
 
@@ -708,7 +634,7 @@ def test_main_install_verbose_does_not_prefetch_runtime(monkeypatch, tmp_path, c
 
     output = capsys.readouterr().out.strip().splitlines()
     assert any("Configured Zed ACP integration" in line for line in output)
-    assert not any("jbang" in line for line in output)
+    assert not any("java" in line.lower() for line in output)
     assert not any("--main" in line for line in output)
 
 
@@ -1133,13 +1059,11 @@ async def test_run_headless_job_reports_failed_terminal_state(
 async def test_run_headless_job_reports_stage_on_submit_failure(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    from brokk_code.executor import ExecutorError
-
     call_order: list[str] = []
     _patch_headless_client(
         monkeypatch,
         call_order=call_order,
-        prompt_error=ExecutorError("401 Unauthorized"),
+        prompt_error=main_module.HeadlessAnvilError("401 Unauthorized"),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -2097,8 +2021,6 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
             "Fix the bug",
             "--workspace",
             str(tmp_path),
-            "--vendor",
-            "Anthropic",
         ],
     )
 
@@ -2107,7 +2029,6 @@ def test_main_commit_routes_correctly(monkeypatch, tmp_path) -> None:
     assert captured["ran"] is True
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
     assert captured["kwargs"]["message"] == "Fix the bug"
-    assert captured["kwargs"]["vendor"] == "Anthropic"
 
 
 def test_main_commit_no_message_routes_correctly(monkeypatch, tmp_path) -> None:
@@ -2744,8 +2665,8 @@ async def test_run_pr_review_job_exits_nonzero_on_failed_state(
     assert "PR review job ended with state FAILED" in captured.err
 
 
-def test_install_skips_jbang_ready(monkeypatch, tmp_path) -> None:
-    """install command only writes config and does not warm up the Java runtime."""
+def test_install_only_writes_config(monkeypatch, tmp_path) -> None:
+    """install command only writes config."""
 
     def fake_configure_zed_acp_settings(
         *, force: bool = False, uvx_command: str | None = None, **_kwargs

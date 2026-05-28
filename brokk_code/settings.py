@@ -8,22 +8,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_THEME = "textual-dark"
-DEFAULT_PROMPT_HISTORY_SIZE = 50
-_LEGACY_THEME_ALIASES = {
-    "builtin:dark": "textual-dark",
-    "builtin:light": "textual-light",
-    "dark": "textual-dark",
-    "light": "textual-light",
-    "brokk-dark": "textual-dark",
-    "brokk-light": "textual-light",
-}
-
-
-def normalize_theme_name(theme: str) -> str:
-    return _LEGACY_THEME_ALIASES.get(theme, theme)
-
-
 def get_global_config_dir() -> Path:
     """Returns the platform-appropriate global configuration directory for Brokk.
     Mirrors ai.brokk.util.BrokkConfigPaths.java.
@@ -55,7 +39,7 @@ def get_global_cache_dir() -> Path:
 
 
 def settings_dir() -> Path:
-    """Returns the legacy .brokk directory in home for settings.json and prompt history."""
+    """Returns the legacy .brokk directory in home for settings.json."""
     return Path.home() / ".brokk"
 
 
@@ -142,23 +126,20 @@ def write_brokk_properties(updates: dict[str, Optional[str]]) -> None:
 
 @dataclass
 class Settings:
-    theme: str = DEFAULT_THEME
-    prompt_history_size: int = DEFAULT_PROMPT_HISTORY_SIZE
+    """Persisted CLI preferences and credentials lookup helpers."""
 
-    # New optional fields for remembering last used models and reasoning settings.
     last_model: Optional[str] = None
     last_code_model: Optional[str] = None
     last_reasoning_level: Optional[str] = None
     last_code_reasoning_level: Optional[str] = None
     last_auto_commit: Optional[bool] = None
-    show_full_welcome: bool = False
 
     @classmethod
     def load(cls) -> "Settings":
         """Loads settings from disk, returning defaults if file is missing or corrupt.
 
-        This is backward-compatible with older settings.json files that omit the new
-        model/reasoning keys: the dataclass defaults (None) are used in that case.
+        Unknown legacy keys are ignored so settings files written by older
+        versions remain readable.
         """
         settings_path = settings_file()
         if not settings_path.exists():
@@ -169,12 +150,10 @@ class Settings:
                 data = json.load(f)
                 # Only pass known fields to the dataclass to avoid issues if the file
                 # contains unexpected keys. Build kwargs from fields present in data.
-                # We rely on dataclass defaults for any missing new fields.
+                # We rely on dataclass defaults for any missing fields.
                 valid_keys = {field.name for field in cls.__dataclass_fields__.values()}
                 filtered = {k: v for k, v in (data or {}).items() if k in valid_keys}
-                settings = cls(**filtered)
-                settings.theme = normalize_theme_name(settings.theme)
-                return settings
+                return cls(**filtered)
         except Exception as e:
             logger.warning("Failed to load settings from %s: %s. Using defaults.", settings_path, e)
             return cls()

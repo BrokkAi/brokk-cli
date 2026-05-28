@@ -22,8 +22,11 @@ from acp.transports import spawn_stdio_transport
 
 from brokk_code import __version__
 from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, resolve_anvil_binary
-from brokk_code.executor import ExecutorError
 from brokk_code.workspace import resolve_workspace_dir
+
+
+class HeadlessAnvilError(Exception):
+    """Raised when headless Anvil ACP execution fails before prompt completion."""
 
 
 class HeadlessAcpClient:
@@ -113,9 +116,9 @@ class HeadlessAcpClient:
         *,
         model: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Submit a prompt and yield executor-shaped events until completion."""
+        """Submit a prompt and yield normalized events until completion."""
         if self._connection is None or self.session_id is None:
-            raise ExecutorError("Anvil ACP client not started")
+            raise HeadlessAnvilError("Anvil ACP client not started")
 
         if model:
             with contextlib.suppress(Exception):
@@ -188,7 +191,7 @@ def build_headless_prompt(
     skip_verification: bool | None = None,
     max_issue_fix_attempts: int | None = None,
 ) -> str:
-    """Build an Anvil prompt equivalent to the old headless executor modes."""
+    """Build an Anvil prompt for a non-interactive CLI mode."""
     mode = mode.upper()
     if mode == "ISSUE_WRITER":
         return _issue_writer_prompt(task_input=task_input, tags=tags)
@@ -404,7 +407,7 @@ request body must reference and close issue #{issue_number}. Finish by reporting
 def _required_tag(tags: dict[str, str], key: str) -> str:
     value = tags.get(key)
     if value is None or not value.strip():
-        raise ExecutorError(f"Missing required tag for headless Anvil prompt: {key}")
+        raise HeadlessAnvilError(f"Missing required tag for headless Anvil prompt: {key}")
     return value.strip()
 
 

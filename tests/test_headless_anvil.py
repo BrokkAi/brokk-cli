@@ -17,9 +17,9 @@ from acp.schema import (
 )
 
 import brokk_code.headless_anvil as headless_anvil_module
-from brokk_code.executor import ExecutorError
 from brokk_code.headless_anvil import (
     HeadlessAcpClient,
+    HeadlessAnvilError,
     _session_update_to_event,
     build_commit_prompt,
     build_headless_prompt,
@@ -30,7 +30,7 @@ from brokk_code.headless_anvil import (
 
 
 def test_build_issue_writer_prompt_requires_repo_tags() -> None:
-    with pytest.raises(ExecutorError, match="repo_owner"):
+    with pytest.raises(HeadlessAnvilError, match="repo_owner"):
         build_headless_prompt(task_input="Create issue", mode="ISSUE_WRITER", tags={})
 
 
