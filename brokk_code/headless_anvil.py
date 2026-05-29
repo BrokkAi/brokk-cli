@@ -457,12 +457,16 @@ def _anvil_subprocess_env() -> dict[str, str]:
 
 def _session_update_to_event(update: Any) -> dict[str, Any] | None:
     update_kind = getattr(update, "session_update", "")
-    if update_kind in {"agent_message_chunk", "agent_thought_chunk"}:
+    if update_kind == "agent_message_chunk":
         text = _content_text(getattr(update, "content", None))
         if text.strip().startswith(ANVIL_READY_MESSAGE):
             return {"type": "NOTIFICATION", "data": {"level": "INFO", "message": text.strip()}}
         if text:
             return {"type": "LLM_TOKEN", "data": {"token": text}}
+    if update_kind == "agent_thought_chunk":
+        text = _content_text(getattr(update, "content", None))
+        if text:
+            return {"type": "TOOL_OUTPUT", "data": {"text": text}}
     if update_kind == "tool_call":
         title = getattr(update, "title", "")
         if title:

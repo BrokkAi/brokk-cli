@@ -3,6 +3,7 @@ import contextlib
 import socket
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -145,6 +146,17 @@ def test_session_update_to_event_maps_agent_text_to_llm_token() -> None:
     event = _session_update_to_event(update_agent_message_text("hello"))
 
     assert event == {"type": "LLM_TOKEN", "data": {"token": "hello"}}
+
+
+def test_session_update_to_event_maps_agent_thought_to_tool_output() -> None:
+    event = _session_update_to_event(
+        SimpleNamespace(
+            session_update="agent_thought_chunk",
+            content=SimpleNamespace(type="text", text="inspecting git status"),
+        )
+    )
+
+    assert event == {"type": "TOOL_OUTPUT", "data": {"text": "inspecting git status"}}
 
 
 def test_session_update_to_event_maps_anvil_ready_message_to_notification() -> None:
