@@ -23,7 +23,7 @@ from brokk_code.workspace import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
-BUNDLED_ANVIL_VERSION = "10.0.1"
+BUNDLED_ANVIL_VERSION = "0.10.1"
 
 _ANVIL_RELEASE_URL = "https://github.com/BrokkAi/anvil/releases/download"
 _ANVIL_DOWNLOAD_TIMEOUT_SECONDS = 300.0
