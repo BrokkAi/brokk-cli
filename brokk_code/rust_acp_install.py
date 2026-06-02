@@ -166,7 +166,7 @@ def _bifrost_triple() -> str:
             "Install bifrost manually or run on an arm64 mac."
         )
     if system == "Android":
-        return "aarch64-android-linux"
+        return "aarch64-linux-android"
     if system == "Linux":
         if machine in ("x86_64", "amd64"):
             return "x86_64-unknown-linux-gnu"
