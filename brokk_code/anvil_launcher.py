@@ -162,6 +162,8 @@ def _anvil_triple() -> str:
     machine = platform.machine().lower()
     if system == "Darwin":
         return "universal-apple-darwin"
+    if system == "Android":
+        return "aarch64-android-linux"
     if system == "Linux":
         if machine in ("x86_64", "amd64"):
             return "x86_64-unknown-linux-gnu"
