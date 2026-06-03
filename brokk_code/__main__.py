@@ -911,7 +911,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    acp_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "acp",
         help="Run Anvil in ACP server mode",
         add_help=False,
@@ -945,7 +945,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Delete the Anvil scripting configuration",
     )
 
-    mcp_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "mcp",
         help="Run the bifrost MCP server (downloads the bundled binary on first use)",
         add_help=False,
