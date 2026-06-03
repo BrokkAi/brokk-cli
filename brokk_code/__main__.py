@@ -394,76 +394,6 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_acp_runtime_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--worktree",
-        action="store_true",
-        default=False,
-        help="Create an isolated git worktree for this session and clean up on exit if no changes",
-    )
-    parser.add_argument(
-        "--anvil-binary",
-        type=Path,
-        default=None,
-        help="Path to an Anvil binary (default: $PATH anvil, else cached release binary)",
-    )
-    parser.add_argument(
-        "--anvil-version",
-        type=str,
-        default=BUNDLED_ANVIL_VERSION,
-        help=f"Anvil version to use when downloading (default: {BUNDLED_ANVIL_VERSION})",
-    )
-    parser.add_argument(
-        "--default-model",
-        type=str,
-        default=None,
-        help="Override the default Anvil model id for new sessions",
-    )
-    parser.add_argument(
-        "--max-turns",
-        type=int,
-        default=None,
-        help="Max Anvil tool-calling iterations per prompt",
-    )
-    parser.add_argument(
-        "--bifrost-binary",
-        type=str,
-        default=None,
-        help="Path to the bifrost executable to enable Anvil code-intel tools",
-    )
-    parser.add_argument(
-        "--llm-idle-timeout-secs",
-        type=int,
-        default=None,
-        help="Seconds of Anvil SSE inactivity before aborting a streaming LLM response",
-    )
-    parser.add_argument(
-        "--no-wasm-sandbox",
-        action="store_true",
-        default=False,
-        help="Disable Anvil's wasmtime-hosted parser sandbox",
-    )
-
-
-def _build_anvil_passthrough_args(
-    args: argparse.Namespace, unknown_args: list[str] | None = None
-) -> list[str]:
-    passthrough: list[str] = []
-    if args.default_model:
-        passthrough.extend(["--default-model", args.default_model])
-    if args.max_turns is not None:
-        passthrough.extend(["--max-turns", str(args.max_turns)])
-    if args.bifrost_binary:
-        passthrough.extend(["--bifrost-binary", args.bifrost_binary])
-    if args.llm_idle_timeout_secs is not None:
-        passthrough.extend(["--llm-idle-timeout-secs", str(args.llm_idle_timeout_secs)])
-    if args.no_wasm_sandbox:
-        passthrough.append("--no-wasm-sandbox")
-    if unknown_args:
-        passthrough.extend(unknown_args)
-    return passthrough
-
-
 def _run_issue_command(
     args: argparse.Namespace,
     command_name: str,
@@ -986,17 +916,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run Anvil in ACP server mode",
         add_help=False,
     )
-    _add_acp_runtime_args(acp_parser)
-    acp_parser.add_argument(
-        "--ide",
-        choices=["intellij", "zed"],
-        default=None,
-        help=(
-            "[Deprecated] Legacy IDE hint (silently ignored). "
-            "Kept for backward compatibility with stale editor configs."
-        ),
-    )
-
     anvil_config_parser = subparsers.add_parser(
         "anvil-config",
         help="Configure model settings for Anvil-backed scripting commands",
@@ -1030,13 +949,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "mcp",
         help="Run the bifrost MCP server (downloads the bundled binary on first use)",
         add_help=False,
-    )
-    _add_common_runtime_args(mcp_parser)
-    mcp_parser.add_argument(
-        "--bifrost-binary",
-        type=str,
-        default=None,
-        help="Path to a bifrost binary (default: $PATH bifrost, else cached release binary)",
     )
 
     install_parser = subparsers.add_parser("install", help="Install integration settings")
@@ -2186,21 +2098,15 @@ def _main_dispatch(
     if args.command == "acp":
         run_anvil_acp_server(
             workspace_dir=workspace_path,
-            binary_override=args.anvil_binary,
-            version=args.anvil_version,
-            passthrough_args=_build_anvil_passthrough_args(args, unknown),
+            passthrough_args=unknown,
         )
         return
 
     if args.command == "mcp":
         from brokk_code.bifrost_launcher import run_bifrost_server
 
-        bifrost_override = (
-            Path(args.bifrost_binary) if getattr(args, "bifrost_binary", None) else None
-        )
         run_bifrost_server(
             workspace_dir=workspace_path,
-            binary_override=bifrost_override,
             passthrough_args=unknown,
         )
         return

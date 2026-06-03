@@ -10,7 +10,7 @@ import pytest
 from brokk_code import bifrost_launcher, rust_acp_install
 
 
-def test_run_bifrost_server_uses_override_and_execs_searchtools(monkeypatch, tmp_path) -> None:
+def test_run_bifrost_server_uses_override_and_execs_bifrost(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
     binary = tmp_path / "bifrost"
@@ -28,21 +28,15 @@ def test_run_bifrost_server_uses_override_and_execs_searchtools(monkeypatch, tmp
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "chdir", fake_chdir)
     monkeypatch.setattr(os, "execvpe", fake_execvpe)
+    monkeypatch.setattr(bifrost_launcher, "resolve_bifrost_binary", lambda **_kwargs: binary)
     with pytest.raises(RuntimeError, match="stop"):
         bifrost_launcher.run_bifrost_server(
             workspace_dir=tmp_path,
-            binary_override=binary,
         )
 
     assert captured["cwd"] == tmp_path.resolve()
     assert captured["binary"] == str(binary)
-    assert captured["command"] == [
-        str(binary),
-        "--root",
-        str(tmp_path.resolve()),
-        "--server",
-        "searchtools",
-    ]
+    assert captured["command"] == [str(binary)]
 
 
 def test_run_bifrost_server_forwards_passthrough_args(monkeypatch, tmp_path) -> None:
@@ -59,17 +53,14 @@ def test_run_bifrost_server_forwards_passthrough_args(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "chdir", lambda _p: None)
     monkeypatch.setattr(os, "execvpe", fake_execvpe)
+    monkeypatch.setattr(bifrost_launcher, "resolve_bifrost_binary", lambda **_kwargs: binary)
     with pytest.raises(RuntimeError, match="stop"):
         bifrost_launcher.run_bifrost_server(
             workspace_dir=tmp_path,
-            binary_override=binary,
             passthrough_args=["--debug", "--log-level", "trace"],
         )
 
-    command = captured["command"]
-    assert command[-3:] == ["--debug", "--log-level", "trace"]
-    assert "--server" in command
-    assert command[command.index("--server") + 1] == "searchtools"
+    assert captured["command"] == [str(binary), "--debug", "--log-level", "trace"]
 
 
 def test_run_bifrost_server_reports_install_error(monkeypatch, tmp_path, capsys) -> None:
@@ -80,7 +71,6 @@ def test_run_bifrost_server_reports_install_error(monkeypatch, tmp_path, capsys)
     with pytest.raises(SystemExit) as excinfo:
         bifrost_launcher.run_bifrost_server(
             workspace_dir=tmp_path,
-            binary_override=None,
         )
 
     assert excinfo.value.code == 1
