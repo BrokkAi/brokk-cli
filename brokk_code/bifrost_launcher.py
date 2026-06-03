@@ -18,30 +18,23 @@ from brokk_code.workspace import resolve_workspace_dir
 def run_bifrost_server(
     *,
     workspace_dir: Path,
-    binary_override: Path | None,
     passthrough_args: list[str] | None = None,
 ) -> None:
-    """Resolve the bifrost binary and exec it as `bifrost --root <ws> --server searchtools`.
+    """Resolve the bifrost binary and exec it with full CLI passthrough.
 
     Replaces the Python process via os.execvpe on Unix; on Windows runs as a
-    child since execvpe loses stdout. Extra positional args from the CLI are
-    forwarded after the fixed `--server searchtools` flag.
+    child since execvpe loses stdout. Brokk changes into the resolved workspace
+    first, then forwards all extra CLI args directly to bifrost unchanged.
     """
     resolved_workspace_dir = resolve_workspace_dir(workspace_dir)
 
     try:
-        bifrost_bin = resolve_bifrost_binary(override=binary_override)
+        bifrost_bin = resolve_bifrost_binary(override=None)
     except (RustAcpInstallError, BifrostInstallError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    command = [
-        str(bifrost_bin),
-        "--root",
-        str(resolved_workspace_dir),
-        "--server",
-        "searchtools",
-    ]
+    command = [str(bifrost_bin)]
     if passthrough_args:
         command.extend(passthrough_args)
 

@@ -15,7 +15,13 @@ This project is a Python CLI for Brokk editor integrations and non-interactive a
 
 This project no longer launches the Java executor or JBang.
 - ACP mode (`brokk acp`) launches Anvil directly over stdio.
+- `brokk acp` is a full passthrough wrapper around `anvil`. "Passthrough" here means Brokk may resolve the binary path and `chdir` into the resolved workspace first, but it must not rewrite, normalize, drop, reorder, or add CLI arguments before invoking Anvil.
+- `brokk acp` must not consume any Brokk-owned runtime flags. Flags such as `--worktree`, `--anvil-binary`, `--anvil-version`, `--default-model`, `--max-turns`, `--bifrost-binary`, `--llm-idle-timeout-secs`, `--no-wasm-sandbox`, and `--ide` must be forwarded unchanged to Anvil when present.
 - MCP mode (`brokk mcp`) launches Bifrost directly over stdio.
+- `brokk mcp` is a full passthrough wrapper around `bifrost`. "Passthrough" here means Brokk may resolve the binary path and `chdir` into the resolved workspace first, but it must not rewrite, normalize, drop, reorder, or add CLI arguments before invoking Bifrost.
+- In particular, do not inject implicit MCP defaults such as `--root`, `--server`, `searchtools`, or any other Bifrost mode/subcommand when handling `brokk mcp`. If the user wants those arguments, they must appear explicitly in the args passed to `brokk mcp`.
+- `brokk mcp` must not expose a Brokk-level `--bifrost-binary` override. If `--bifrost-binary` appears after `brokk mcp`, treat it as a literal Bifrost CLI argument and pass it through unchanged.
+- `brokk mcp` must not consume any Brokk runtime flags at all. Flags such as `--worktree`, `--anvil-binary`, and `--anvil-version` are invalid as Brokk-owned options on this subcommand and must be forwarded unchanged to Bifrost when present.
 - Headless commands (`exec`, `issue`, `pr`, `commit`) submit ACP prompts to Anvil through the Python ACP SDK.
 - For commands that touch GitHub, Anvil is only used to generate text. The Python CLI performs the actual `gh` calls and must validate that the expected issue, comment, review, or pull request was created.
 - Do not add GitHub credential environment variable names, credential flags, or credential forwarding logic anywhere in this repository. GitHub authentication belongs to the `gh` CLI/configuration, and Anvil must not receive GitHub auth environment.

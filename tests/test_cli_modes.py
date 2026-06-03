@@ -295,7 +295,6 @@ def test_main_acp_routes_to_anvil_launcher(monkeypatch, tmp_path) -> None:
     main_module.main()
 
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert captured["kwargs"]["binary_override"] is None
     assert captured["kwargs"]["passthrough_args"] == [
         "--default-model",
         "claude-haiku-4-5",
@@ -329,6 +328,98 @@ def test_main_acp_forwards_unknown_args_as_anvil_passthrough(monkeypatch) -> Non
         "--help",
         "--future-anvil-flag",
         "value",
+    ]
+
+
+def test_main_acp_does_not_consume_brokk_runtime_flags(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "acp",
+            "--worktree",
+            "--anvil-binary",
+            "anvil-bin",
+            "--anvil-version",
+            "9.9.9",
+            "--default-model",
+            "gpt-5",
+            "--max-turns",
+            "20",
+            "--bifrost-binary",
+            "bifrost-bin",
+            "--llm-idle-timeout-secs",
+            "30",
+            "--no-wasm-sandbox",
+            "--ide",
+            "zed",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--worktree",
+        "--anvil-binary",
+        "anvil-bin",
+        "--anvil-version",
+        "9.9.9",
+        "--default-model",
+        "gpt-5",
+        "--max-turns",
+        "20",
+        "--bifrost-binary",
+        "bifrost-bin",
+        "--llm-idle-timeout-secs",
+        "30",
+        "--no-wasm-sandbox",
+        "--ide",
+        "zed",
+    ]
+
+
+def test_main_acp_does_not_consume_root_position_brokk_runtime_flags(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "--worktree",
+            "--anvil-binary",
+            "anvil-bin",
+            "--anvil-version=9.9.9",
+            "acp",
+            "--default-model",
+            "gpt-5",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--worktree",
+        "--anvil-binary",
+        "anvil-bin",
+        "--anvil-version=9.9.9",
+        "--default-model",
+        "gpt-5",
     ]
 
 
@@ -375,8 +466,6 @@ def test_main_acp_native_command_is_removed(monkeypatch, tmp_path, capsys) -> No
 
 def test_main_mcp_routes_to_bifrost_launcher(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
-    binary = tmp_path / "bifrost"
-    binary.write_text("stub")
 
     from brokk_code import bifrost_launcher as bifrost_launcher_module
 
@@ -391,8 +480,6 @@ def test_main_mcp_routes_to_bifrost_launcher(monkeypatch, tmp_path) -> None:
         [
             "brokk",
             "mcp",
-            "--bifrost-binary",
-            str(binary),
             "--debug",
         ],
     )
@@ -400,7 +487,6 @@ def test_main_mcp_routes_to_bifrost_launcher(monkeypatch, tmp_path) -> None:
     main_module.main()
 
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert captured["kwargs"]["binary_override"] == binary
     assert captured["kwargs"]["passthrough_args"] == ["--debug"]
 
 
@@ -471,6 +557,104 @@ def test_main_mcp_help_forwarding(monkeypatch, tmp_path) -> None:
     assert captured["kwargs"]["passthrough_args"] == ["--help"]
 
 
+def test_main_mcp_does_not_consume_bifrost_binary_flag(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {}
+
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["brokk", "mcp", "--bifrost-binary", "custom-bin", "--debug"],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == ["--bifrost-binary", "custom-bin", "--debug"]
+
+
+def test_main_mcp_does_not_consume_brokk_runtime_flags(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {}
+
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "mcp",
+            "--worktree",
+            "--anvil-binary",
+            "anvil-bin",
+            "--anvil-version",
+            "9.9.9",
+            "--debug",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--worktree",
+        "--anvil-binary",
+        "anvil-bin",
+        "--anvil-version",
+        "9.9.9",
+        "--debug",
+    ]
+
+
+def test_main_mcp_does_not_consume_root_position_brokk_runtime_flags(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {}
+
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "--worktree",
+            "--anvil-binary",
+            "anvil-bin",
+            "--anvil-version",
+            "9.9.9",
+            "mcp",
+            "--debug",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--worktree",
+        "--anvil-binary",
+        "anvil-bin",
+        "--anvil-version",
+        "9.9.9",
+        "--debug",
+    ]
+
+
 def test_main_exec_resolves_workspace_to_repo_root(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
     repo_root = tmp_path / "repo"
@@ -498,7 +682,7 @@ def test_main_exec_resolves_workspace_to_repo_root(monkeypatch, tmp_path) -> Non
     assert captured["kwargs"]["tags"] == {"mode": "LITE_AGENT"}
 
 
-def test_main_acp_accepts_legacy_ide_flag_but_ignores_it(monkeypatch, tmp_path) -> None:
+def test_main_acp_forwards_legacy_ide_flag(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
 
     def fake_run_anvil_acp_server(**kwargs: Any) -> None:
@@ -520,8 +704,7 @@ def test_main_acp_accepts_legacy_ide_flag_but_ignores_it(monkeypatch, tmp_path) 
     main_module.main()
 
     assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
-    assert "--ide" not in captured["kwargs"]["passthrough_args"]
-    assert "zed" not in captured["kwargs"]["passthrough_args"]
+    assert captured["kwargs"]["passthrough_args"] == ["--ide", "zed"]
 
 
 def test_main_acp_forwards_extra_positional_to_anvil(monkeypatch, tmp_path) -> None:
