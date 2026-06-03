@@ -1782,7 +1782,55 @@ def _resolve_worktree_workspace_path(
     return worktree_path / relative_workspace
 
 
+def _passthrough_command_from_argv(argv: list[str]) -> tuple[str, list[str]] | None:
+    """Return passthrough command and args without argparse consuming root flags.
+
+    The acp/mcp subcommands are transparent launchers. argparse root options
+    such as --worktree or --anvil-binary must therefore not be interpreted as
+    Brokk-owned flags when they appear before those launcher commands.
+    """
+    root_options_with_values = {"--anvil-binary", "--anvil-version"}
+    root_flags = {"--worktree"}
+    help_flags = {"-h", "--help"}
+
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in help_flags:
+            return None
+        if token == "--":
+            index += 1
+            break
+        if token in root_flags:
+            index += 1
+            continue
+        if token in root_options_with_values:
+            index += 2
+            continue
+        if any(token.startswith(f"{option}=") for option in root_options_with_values):
+            index += 1
+            continue
+        break
+
+    if index >= len(argv):
+        return None
+
+    command = argv[index]
+    if command not in {"acp", "mcp"}:
+        return None
+
+    return command, [*argv[:index], *argv[index + 1 :]]
+
+
 def main():
+    raw_args = sys.argv[1:]
+    passthrough_command = _passthrough_command_from_argv(raw_args)
+    if passthrough_command is not None:
+        command, passthrough_args = passthrough_command
+        args = argparse.Namespace(command=command)
+        _main_dispatch(args, Path.cwd().resolve(), passthrough_args)
+        return
+
     parser = _build_parser()
     args, unknown = parser.parse_known_args()
 
