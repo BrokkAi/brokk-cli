@@ -387,6 +387,44 @@ def test_main_acp_does_not_consume_brokk_runtime_flags(monkeypatch, tmp_path) ->
     ]
 
 
+def test_main_acp_does_not_consume_root_position_brokk_runtime_flags(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_anvil_acp_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "run_anvil_acp_server", fake_run_anvil_acp_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "--worktree",
+            "--anvil-binary",
+            "anvil-bin",
+            "--anvil-version=9.9.9",
+            "acp",
+            "--default-model",
+            "gpt-5",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--worktree",
+        "--anvil-binary",
+        "anvil-bin",
+        "--anvil-version=9.9.9",
+        "--default-model",
+        "gpt-5",
+    ]
+
+
 def test_main_anvil_config_show(monkeypatch, capsys) -> None:
     AnvilScriptingConfig(
         use_global=True,
@@ -564,6 +602,46 @@ def test_main_mcp_does_not_consume_brokk_runtime_flags(monkeypatch, tmp_path) ->
             "anvil-bin",
             "--anvil-version",
             "9.9.9",
+            "--debug",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--worktree",
+        "--anvil-binary",
+        "anvil-bin",
+        "--anvil-version",
+        "9.9.9",
+        "--debug",
+    ]
+
+
+def test_main_mcp_does_not_consume_root_position_brokk_runtime_flags(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "--worktree",
+            "--anvil-binary",
+            "anvil-bin",
+            "--anvil-version",
+            "9.9.9",
+            "mcp",
             "--debug",
         ],
     )
