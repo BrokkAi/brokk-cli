@@ -387,9 +387,7 @@ def test_main_acp_does_not_consume_brokk_runtime_flags(monkeypatch, tmp_path) ->
     ]
 
 
-def test_main_acp_does_not_consume_root_position_brokk_runtime_flags(
-    monkeypatch, tmp_path
-) -> None:
+def test_main_acp_does_not_consume_root_position_brokk_runtime_flags(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
 
     def fake_run_anvil_acp_server(**kwargs: Any) -> None:
@@ -619,9 +617,7 @@ def test_main_mcp_does_not_consume_brokk_runtime_flags(monkeypatch, tmp_path) ->
     ]
 
 
-def test_main_mcp_does_not_consume_root_position_brokk_runtime_flags(
-    monkeypatch, tmp_path
-) -> None:
+def test_main_mcp_does_not_consume_root_position_brokk_runtime_flags(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {}
 
     from brokk_code import bifrost_launcher as bifrost_launcher_module
