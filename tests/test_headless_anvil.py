@@ -112,8 +112,8 @@ def test_build_pr_review_prompt_includes_threshold() -> None:
 def test_build_commit_prompt_includes_contract_and_message() -> None:
     prompt = build_commit_prompt(message="Fix parser bug")
 
-    assert "Return this exact git commit message" in prompt
-    assert "Fix parser bug" in prompt
+    assert '"message": "Fix parser bug"' in prompt
+    assert "Output only a JSON object" in prompt or "Return only a JSON object" in prompt
     assert "commit" in prompt.lower()
 
 

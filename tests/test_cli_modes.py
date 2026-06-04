@@ -2754,7 +2754,7 @@ async def test_run_commit_success_output(monkeypatch, tmp_path, capsys) -> None:
 
 @pytest.mark.asyncio
 async def test_run_commit_uses_anvil_for_missing_message(monkeypatch, tmp_path) -> None:
-    """Verifies that run_commit asks Anvil only for commit message text."""
+    """Verifies that run_commit asks Anvil only for commit message JSON."""
     captured: dict[str, Any] = {}
     heads = iter(["abc0000", "def1111"])
     monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
@@ -2764,7 +2764,7 @@ async def test_run_commit_uses_anvil_for_missing_message(monkeypatch, tmp_path) 
 
     async def fake_anvil_text(**kwargs: Any) -> str:
         captured.update(kwargs)
-        return "Generated commit message"
+        return '{"message": "Generated commit message"}'
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
@@ -2777,11 +2777,30 @@ async def test_run_commit_uses_anvil_for_missing_message(monkeypatch, tmp_path) 
 
     assert captured["model"] == "gpt-test"
     assert captured["verbose"] is True
-    assert "derive one concise git commit" in captured["prompt"]
+    assert '"message": "Commit message"' in captured["prompt"]
 
 
 @pytest.mark.asyncio
 async def test_run_commit_cleans_generated_markdown_fence(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, ...]] = []
+    heads = iter(["abc0000", "def1111"])
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        return '```json\n{"message": "Fix generated commit message"}\n```'
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+
+    await main_module.run_commit(workspace_dir=tmp_path, message=None)
+
+    assert ("commit", "-m", "Fix generated commit message") in calls
+
+
+@pytest.mark.asyncio
+async def test_run_commit_falls_back_to_cleaning_legacy_text(monkeypatch, tmp_path) -> None:
     calls: list[tuple[str, ...]] = []
     heads = iter(["abc0000", "def1111"])
     monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
@@ -2809,6 +2828,27 @@ async def test_run_commit_extracts_generated_git_commit_command(monkeypatch, tmp
     monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
 
     async def fake_anvil_text(**_kwargs: Any) -> str:
+        return '```bash\ngit commit -m "Fix generated commit message"\n```'
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+
+    await main_module.run_commit(workspace_dir=tmp_path, message=None)
+
+    assert ("commit", "-m", "Fix generated commit message") in calls
+
+
+@pytest.mark.asyncio
+async def test_run_commit_falls_back_for_generated_git_commit_command(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    heads = iter(["abc0000", "def1111"])
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
         return 'git commit -m "Fix generated commit message"'
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
@@ -2816,6 +2856,37 @@ async def test_run_commit_extracts_generated_git_commit_command(monkeypatch, tmp
     await main_module.run_commit(workspace_dir=tmp_path, message=None)
 
     assert ("commit", "-m", "Fix generated commit message") in calls
+
+
+@pytest.mark.asyncio
+async def test_run_commit_strips_anvil_welcome_message(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, ...]] = []
+    heads = iter(["abc0000", "def1111"])
+    monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
+    monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
+    monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
+
+    async def fake_anvil_text(**_kwargs: Any) -> str:
+        return (
+            "Anvil is ready. Run `/setup` anytime to change or repair model setup.\n"
+            "Fix generated commit message"
+        )
+
+    monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
+
+    await main_module.run_commit(workspace_dir=tmp_path, message=None)
+
+    assert ("commit", "-m", "Fix generated commit message") in calls
+
+
+def test_clean_generated_commit_message_strips_anvil_welcome_line() -> None:
+    cleaned = main_module._clean_generated_commit_message(
+        "Anvil is ready. Run `/setup` anytime to change or repair model setup.\n"
+        "Fix generated commit message"
+    )
+
+    assert cleaned == "Fix generated commit message"
 
 
 @pytest.mark.asyncio

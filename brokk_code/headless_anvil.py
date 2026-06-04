@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import uuid
 from contextlib import AsyncExitStack
@@ -289,12 +290,24 @@ meets that threshold. Do not post anything to GitHub; the CLI will post the revi
 def build_commit_prompt(*, message: str | None = None) -> str:
     """Build an Anvil prompt for deriving a commit message."""
     if message and message.strip():
-        return f"Return this exact git commit message and nothing else:\n\n{message.strip()}"
+        return f"""
+Return only a JSON object with this exact shape for the git commit message:
+
+{{
+  "message": {json.dumps(message.strip())}
+}}
+""".strip()
     return """
 Inspect the staged and unstaged repository changes and derive one concise git commit
 message.
 
-Output only the commit message. Do not stage files, do not commit, and do not run git.
+Output only a JSON object with this exact shape:
+
+{
+  "message": "Commit message"
+}
+
+Do not stage files, do not commit, and do not run git.
 """.strip()
 
 
