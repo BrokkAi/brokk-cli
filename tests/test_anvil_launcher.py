@@ -51,53 +51,27 @@ def test_resolve_anvil_binary_prefers_override(tmp_path) -> None:
     assert resolved == binary
 
 
-def test_resolve_anvil_binary_uses_path_when_version_matches(monkeypatch, tmp_path) -> None:
-    found = tmp_path / "anvil"
-    found.write_text("")
-    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: str(found))
-    monkeypatch.setattr(anvil_launcher, "_anvil_version_matches", lambda _path, _version: True)
+def test_resolve_anvil_binary_uses_latest_release_when_version_omitted(
+    monkeypatch, tmp_path
+) -> None:
+    resolved_binary = tmp_path / "downloaded-anvil"
+    resolved_binary.write_text("")
+
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(anvil_launcher, "latest_github_release_version", lambda _repo: "7.7.7")
+
+    captured: dict[str, str] = {}
+
+    def fake_download(version: str) -> Path:
+        captured["version"] = version
+        return resolved_binary
+
+    monkeypatch.setattr(anvil_launcher, "_download_anvil", fake_download)
 
     resolved = anvil_launcher.resolve_anvil_binary(override=None)
 
-    assert resolved == found
-
-
-def test_resolve_anvil_binary_skips_path_on_version_mismatch(monkeypatch, tmp_path) -> None:
-    cache_root = tmp_path / "cache"
-
-    def fake_cache_path(version: str) -> Path:
-        triple_dir = cache_root / "anvil" / version / "fake-triple"
-        triple_dir.mkdir(parents=True, exist_ok=True)
-        return triple_dir / "anvil"
-
-    on_path = tmp_path / "stale" / "anvil"
-    on_path.parent.mkdir()
-    on_path.write_text("")
-
-    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: str(on_path))
-    monkeypatch.setattr(anvil_launcher, "_anvil_cache_binary_path", fake_cache_path)
-
-    cached = fake_cache_path(anvil_launcher.BUNDLED_ANVIL_VERSION)
-    cached.write_text("stub")
-    cached.chmod(0o755)
-
-    version_checks: list[Path] = []
-
-    def fake_version_matches(path: Path, _version: str) -> bool:
-        version_checks.append(path)
-        return path == cached
-
-    monkeypatch.setattr(anvil_launcher, "_anvil_version_matches", fake_version_matches)
-
-    def fail_download(_version: str) -> Path:
-        raise AssertionError("must not download when cache hit is available")
-
-    monkeypatch.setattr(anvil_launcher, "_download_anvil", fail_download)
-
-    resolved = anvil_launcher.resolve_anvil_binary(override=None)
-
-    assert resolved == cached
-    assert version_checks == [on_path, cached]
+    assert resolved == resolved_binary
+    assert captured["version"] == "7.7.7"
 
 
 def test_resolve_anvil_binary_redownloads_invalid_cached_binary(monkeypatch, tmp_path) -> None:
@@ -127,7 +101,7 @@ def test_download_anvil_redownloads_invalid_cache_after_lock(monkeypatch, tmp_pa
     target.write_text("corrupted")
     target.chmod(0o755)
 
-    monkeypatch.setattr(anvil_launcher, "_anvil_triple", lambda: "fake-triple")
+    monkeypatch.setattr(anvil_launcher, "_anvil_triple", lambda _version: "fake-triple")
     monkeypatch.setattr(anvil_launcher, "_anvil_cache_binary_path", lambda _version: target)
     monkeypatch.setattr(
         anvil_launcher, "_anvil_download_lock", lambda _version: contextlib.nullcontext()
@@ -164,7 +138,7 @@ def test_download_anvil_redownloads_invalid_cache_after_lock(monkeypatch, tmp_pa
 def test_anvil_download_lock_includes_platform_triple(monkeypatch, tmp_path) -> None:
     cache_root = tmp_path / "cache"
     monkeypatch.setattr("brokk_code.anvil_launcher.get_global_cache_dir", lambda: cache_root)
-    monkeypatch.setattr(anvil_launcher, "_anvil_triple", lambda: "fake-triple")
+    monkeypatch.setattr(anvil_launcher, "_anvil_triple", lambda _version: "fake-triple")
 
     with anvil_launcher._anvil_download_lock("1.2.3"):
         lock_path = cache_root / "anvil" / "1.2.3-fake-triple.lock"

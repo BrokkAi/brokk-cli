@@ -18,13 +18,13 @@ from pathlib import Path
 
 import httpx
 
+from brokk_code.release_resolver import ReleaseResolverError, latest_github_release_version
 from brokk_code.settings import get_global_cache_dir
 from brokk_code.workspace import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
-BUNDLED_ANVIL_VERSION = "0.10.1"
-
+_ANVIL_GITHUB_REPO = "BrokkAi/anvil"
 _ANVIL_RELEASE_URL = "https://github.com/BrokkAi/anvil/releases/download"
 _ANVIL_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 _ANVIL_LOCK_TIMEOUT_SECONDS = 600.0
@@ -39,7 +39,7 @@ def run_anvil_acp_server(
     *,
     workspace_dir: Path,
     binary_override: Path | None = None,
-    version: str = BUNDLED_ANVIL_VERSION,
+    version: str | None = None,
     passthrough_args: list[str] | None = None,
 ) -> None:
     """Launch Anvil as the ACP stdio server."""
@@ -86,38 +86,53 @@ def _anvil_subprocess_env() -> dict[str, str]:
 
 def resolve_anvil_binary(
     *,
-    version: str = BUNDLED_ANVIL_VERSION,
+    version: str | None = None,
     override: Path | None = None,
 ) -> Path:
     """Resolve the Anvil binary path.
 
     Order: override > matching $PATH binary > cached release > downloaded release.
+    When ``version`` is omitted, Brokk resolves the latest GitHub release dynamically,
+    then still reuses a matching $PATH or cached binary before downloading anything.
     """
     if override is not None:
         return _validate_existing_file(override, "anvil")
 
+    resolved_version = _resolve_anvil_version(version)
+
     on_path = shutil.which("anvil")
     if on_path:
         on_path_p = Path(on_path)
-        if _anvil_version_matches(on_path_p, version):
+        if _anvil_version_matches(on_path_p, resolved_version):
             return on_path_p
         logger.info(
-            "Ignoring anvil on $PATH at %s: version does not match bundled %s",
+            "Ignoring anvil on $PATH at %s: version does not match requested %s",
             on_path_p,
-            version,
+            resolved_version,
         )
 
-    binary_path = _anvil_cache_binary_path(version)
+    binary_path = _anvil_cache_binary_path(resolved_version)
     if binary_path.exists() and os.access(binary_path, os.X_OK):
-        if _anvil_version_matches(binary_path, version):
+        if _anvil_version_matches(binary_path, resolved_version):
             return binary_path
         logger.info(
-            "Ignoring cached anvil at %s: version does not match bundled %s",
+            "Ignoring cached anvil at %s: version does not match requested %s",
             binary_path,
-            version,
+            resolved_version,
         )
 
-    return _download_anvil(version)
+    return _download_anvil(resolved_version)
+
+
+def _resolve_anvil_version(version: str | None) -> str:
+    normalized_version = (version or "").strip().removeprefix("v")
+    if normalized_version:
+        return normalized_version
+
+    try:
+        return latest_github_release_version(_ANVIL_GITHUB_REPO)
+    except ReleaseResolverError as exc:
+        raise AnvilInstallError(f"Failed to resolve latest Anvil release: {exc}") from exc
 
 
 def _validate_existing_file(path: Path, name: str) -> Path:
@@ -157,7 +172,7 @@ def _anvil_version_matches(binary_path: Path, expected_version: str) -> bool:
     return len(tokens) >= 2 and tokens[0] == "anvil" and tokens[1] == expected_version
 
 
-def _anvil_triple() -> str:
+def _anvil_triple(version: str) -> str:
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Darwin":
@@ -173,9 +188,7 @@ def _anvil_triple() -> str:
     if system == "Windows":
         if machine in ("amd64", "x86_64"):
             return "x86_64-pc-windows-msvc"
-        raise AnvilInstallError(
-            f"anvil v{BUNDLED_ANVIL_VERSION} does not ship a Windows binary for {machine}."
-        )
+        raise AnvilInstallError(f"anvil v{version} does not ship a Windows binary for {machine}.")
     raise AnvilInstallError(f"Unsupported system: {system} {machine}")
 
 
@@ -184,7 +197,13 @@ def _anvil_binary_filename() -> str:
 
 
 def _anvil_cache_binary_path(version: str) -> Path:
-    return get_global_cache_dir() / "anvil" / version / _anvil_triple() / _anvil_binary_filename()
+    return (
+        get_global_cache_dir()
+        / "anvil"
+        / version
+        / _anvil_triple(version)
+        / _anvil_binary_filename()
+    )
 
 
 def _anvil_archive_url(version: str, asset_name: str) -> str:
@@ -194,7 +213,7 @@ def _anvil_archive_url(version: str, asset_name: str) -> str:
 @contextlib.contextmanager
 def _anvil_download_lock(version: str) -> Iterator[None]:
     """File-based lock to serialize concurrent downloads of the same platform asset."""
-    triple = _anvil_triple()
+    triple = _anvil_triple(version)
     lock_path = get_global_cache_dir() / "anvil" / f"{version}-{triple}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -222,7 +241,7 @@ def _anvil_download_lock(version: str) -> Iterator[None]:
 
 
 def _download_anvil(version: str) -> Path:
-    triple = _anvil_triple()
+    triple = _anvil_triple(version)
     asset_name = f"brokk-anvil-v{version}-{triple}.zip"
     archive_url = _anvil_archive_url(version, asset_name)
     sha256_url = f"{archive_url}.sha256"
@@ -235,7 +254,7 @@ def _download_anvil(version: str) -> Path:
             if _anvil_version_matches(target, version):
                 return target
             logger.info(
-                "Replacing cached anvil at %s: version does not match bundled %s",
+                "Replacing cached anvil at %s: version does not match requested %s",
                 target,
                 version,
             )

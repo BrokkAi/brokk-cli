@@ -7,11 +7,12 @@ on the editor inheriting a PATH that finds them at agent-launch time. Pass
 
 For the `brokk mcp` MCP subcommand, `resolve_bifrost_binary` prefers (in
 order): explicit override, an entry on `$PATH` whose `--version` output matches
-`BUNDLED_BIFROST_VERSION`, then a downloaded-and-cached release binary pinned
-to that same version. Cached binaries live under
+the requested release, then a downloaded-and-cached release binary for that same
+version. When no version is provided, Brokk resolves the latest GitHub release
+dynamically. Cached binaries live under
 `get_global_cache_dir() / "bifrost" / <version>`. A `$PATH` binary whose version
-does not match (or does not respond to `--version`) is skipped and the bundled
-release is used instead.
+does not match (or does not respond to `--version`) is skipped and the
+requested release is used instead.
 """
 
 from __future__ import annotations
@@ -34,12 +35,12 @@ from pathlib import Path
 
 import httpx
 
+from brokk_code.release_resolver import ReleaseResolverError, latest_github_release_version
 from brokk_code.settings import get_global_cache_dir
 
 logger = logging.getLogger(__name__)
 
-BUNDLED_BIFROST_VERSION = "0.5.3"
-
+_BIFROST_GITHUB_REPO = "BrokkAi/bifrost"
 _BIFROST_RELEASE_URL = "https://github.com/BrokkAi/bifrost/releases/download"
 _BIFROST_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 _BIFROST_LOCK_TIMEOUT_SECONDS = 600.0
@@ -93,32 +94,46 @@ def _validate_existing_file(path: Path, name: str) -> Path:
 
 def resolve_bifrost_binary(
     *,
-    version: str = BUNDLED_BIFROST_VERSION,
+    version: str | None = None,
     override: Path | None = None,
 ) -> Path:
     """Resolve the bifrost binary path.
 
-    Order: override > $PATH > cached release > download release.
+    Order: override > matching $PATH > cached release > download release.
+    When ``version`` is omitted, Brokk resolves the latest GitHub release dynamically.
     """
     if override is not None:
         return _validate_existing_file(override, "bifrost")
 
+    resolved_version = _resolve_bifrost_version(version)
+
     on_path = shutil.which("bifrost")
     if on_path:
         on_path_p = Path(on_path)
-        if _bifrost_version_matches(on_path_p, version):
+        if _bifrost_version_matches(on_path_p, resolved_version):
             return on_path_p
         logger.info(
-            "Ignoring bifrost on $PATH at %s: version does not match bundled %s",
+            "Ignoring bifrost on $PATH at %s: version does not match requested %s",
             on_path_p,
-            version,
+            resolved_version,
         )
 
-    binary_path = _bifrost_cache_binary_path(version)
+    binary_path = _bifrost_cache_binary_path(resolved_version)
     if binary_path.exists() and os.access(binary_path, os.X_OK):
         return binary_path
 
-    return _download_bifrost(version)
+    return _download_bifrost(resolved_version)
+
+
+def _resolve_bifrost_version(version: str | None) -> str:
+    normalized_version = (version or "").strip().removeprefix("v")
+    if normalized_version:
+        return normalized_version
+
+    try:
+        return latest_github_release_version(_BIFROST_GITHUB_REPO)
+    except ReleaseResolverError as exc:
+        raise BifrostInstallError(f"Failed to resolve latest bifrost release: {exc}") from exc
 
 
 def _bifrost_version_matches(binary_path: Path, expected_version: str) -> bool:
@@ -154,14 +169,14 @@ def _bifrost_version_matches(binary_path: Path, expected_version: str) -> bool:
     return len(tokens) >= 2 and tokens[0] == "bifrost" and tokens[1] == expected_version
 
 
-def _bifrost_triple() -> str:
+def _bifrost_triple(version: str) -> str:
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Darwin":
         if machine in ("arm64", "aarch64"):
             return "aarch64-apple-darwin"
         raise BifrostInstallError(
-            f"bifrost v{BUNDLED_BIFROST_VERSION} does not ship an Intel macOS "
+            f"bifrost v{version} does not ship an Intel macOS "
             f"(x86_64-apple-darwin) binary. Detected machine: {machine}. "
             "Install bifrost manually or run on an arm64 mac."
         )
@@ -195,7 +210,7 @@ def _bifrost_cache_binary_path(version: str) -> Path:
         get_global_cache_dir()
         / "bifrost"
         / version
-        / _bifrost_triple()
+        / _bifrost_triple(version)
         / _bifrost_binary_filename()
     )
 
@@ -234,7 +249,7 @@ def _bifrost_download_lock(version: str) -> Iterator[None]:
 
 
 def _download_bifrost(version: str) -> Path:
-    triple = _bifrost_triple()
+    triple = _bifrost_triple(version)
     extension = _bifrost_archive_extension(triple)
     asset_name = f"bifrost-v{version}-{triple}{extension}"
     archive_url = _bifrost_archive_url(version, asset_name)
