@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import uuid
 from contextlib import AsyncExitStack
@@ -27,6 +28,11 @@ from brokk_code.workspace import resolve_workspace_dir
 ANVIL_MODEL_CONFIG_ID = "model_selection"
 ANVIL_REASONING_EFFORT_CONFIG_ID = "reasoning_effort"
 ANVIL_READY_MESSAGE = "Anvil is ready. Run `/setup` anytime to change or repair model setup."
+_ANVIL_READY_MESSAGE_PREFIXES = (
+    ANVIL_READY_MESSAGE,
+    "Anvil found a working model setup and is ready to use.",
+    "Run `/setup` anytime to change or repair model setup.",
+)
 
 
 class HeadlessAnvilError(Exception):
@@ -289,12 +295,24 @@ meets that threshold. Do not post anything to GitHub; the CLI will post the revi
 def build_commit_prompt(*, message: str | None = None) -> str:
     """Build an Anvil prompt for deriving a commit message."""
     if message and message.strip():
-        return f"Return this exact git commit message and nothing else:\n\n{message.strip()}"
+        return f"""
+Return only a JSON object with this exact shape for the git commit message:
+
+{{
+  "message": {json.dumps(message.strip())}
+}}
+""".strip()
     return """
 Inspect the staged and unstaged repository changes and derive one concise git commit
 message.
 
-Output only the commit message. Do not stage files, do not commit, and do not run git.
+Output only a JSON object with this exact shape:
+
+{
+  "message": "Commit message"
+}
+
+Do not stage files, do not commit, and do not run git.
 """.strip()
 
 
@@ -459,8 +477,9 @@ def _session_update_to_event(update: Any) -> dict[str, Any] | None:
     update_kind = getattr(update, "session_update", "")
     if update_kind in {"agent_message_chunk", "agent_thought_chunk"}:
         text = _content_text(getattr(update, "content", None))
-        if text.strip().startswith(ANVIL_READY_MESSAGE):
-            return {"type": "NOTIFICATION", "data": {"level": "INFO", "message": text.strip()}}
+        stripped_text = text.strip()
+        if any(stripped_text.startswith(prefix) for prefix in _ANVIL_READY_MESSAGE_PREFIXES):
+            return {"type": "NOTIFICATION", "data": {"level": "INFO", "message": stripped_text}}
         if text:
             return {"type": "LLM_TOKEN", "data": {"token": text}}
     if update_kind == "tool_call":

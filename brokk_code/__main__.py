@@ -25,6 +25,7 @@ from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
 from brokk_code.git_utils import infer_github_repo_from_remote
 from brokk_code.headless_anvil import (
+    ANVIL_READY_MESSAGE,
     HeadlessAcpClient,
     HeadlessAnvilError,
     build_commit_prompt,
@@ -88,6 +89,16 @@ def _die(message: str) -> None:
 
 def _extract_json_object(text: str) -> dict[str, Any]:
     raw = text.strip()
+    welcome_lines = {
+        ANVIL_READY_MESSAGE.strip(),
+        f"INFO: {ANVIL_READY_MESSAGE}".strip(),
+        "Anvil found a working model setup and is ready to use.",
+        "INFO: Anvil found a working model setup and is ready to use.",
+        "Run `/setup` anytime to change or repair model setup.",
+        "INFO: Run `/setup` anytime to change or repair model setup.",
+    }
+    filtered_lines = [line for line in raw.splitlines() if line.strip() not in welcome_lines]
+    raw = "\n".join(filtered_lines).strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw).strip()
@@ -138,6 +149,15 @@ def _git_status_porcelain(workspace_dir: Path) -> str | None:
 def _clean_generated_commit_message(text: str) -> str:
     """Normalize common LLM wrappers around an intended commit message."""
     message = text.strip()
+    if not message:
+        return ""
+
+    welcome_lines = {
+        ANVIL_READY_MESSAGE.strip(),
+        f"INFO: {ANVIL_READY_MESSAGE}".strip(),
+    }
+    filtered_lines = [line for line in message.splitlines() if line.strip() not in welcome_lines]
+    message = "\n".join(filtered_lines).strip()
     if not message:
         return ""
 
@@ -1225,7 +1245,10 @@ async def run_commit(
                 progress_label="commit message",
                 verbose=verbose,
             )
-            commit_message = _clean_generated_commit_message(generated_message)
+            commit_message = _json_string_field(
+                _extract_json_object(generated_message),
+                "message",
+            )
         if not commit_message:
             _die("Anvil did not return a commit message")
 
