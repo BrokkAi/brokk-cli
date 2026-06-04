@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION
 from brokk_code.headless_anvil import (
     ANVIL_MODEL_CONFIG_ID,
     ANVIL_REASONING_EFFORT_CONFIG_ID,
@@ -141,7 +140,7 @@ def resolve_anvil_selection(
     reasoning_override: str | None = None,
     workspace_dir: Path | None = None,
     anvil_binary: Path | None = None,
-    anvil_version: str = BUNDLED_ANVIL_VERSION,
+    anvil_version: str | None = None,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
 ) -> AnvilToolSelection:
@@ -171,7 +170,7 @@ def configure_anvil_scripting_interactive(
     *,
     workspace_dir: Path | None = None,
     anvil_binary: Path | None = None,
-    anvil_version: str = BUNDLED_ANVIL_VERSION,
+    anvil_version: str | None = None,
     catalog: AnvilOptionCatalog | None = None,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
@@ -236,7 +235,7 @@ def query_anvil_option_catalog(
     *,
     workspace_dir: Path | None = None,
     anvil_binary: Path | None = None,
-    anvil_version: str = BUNDLED_ANVIL_VERSION,
+    anvil_version: str | None = None,
     output_stream: TextIO | None = None,
 ) -> AnvilOptionCatalog:
     workspace = workspace_dir or Path.cwd()
@@ -258,7 +257,7 @@ async def _query_anvil_option_catalog(
     *,
     workspace_dir: Path,
     anvil_binary: Path | None,
-    anvil_version: str,
+    anvil_version: str | None,
 ) -> AnvilOptionCatalog:
     client = HeadlessAcpClient(
         workspace_dir=workspace_dir,

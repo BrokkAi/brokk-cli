@@ -21,7 +21,7 @@ from acp.schema import (
 from acp.transports import spawn_stdio_transport
 
 from brokk_code import __version__
-from brokk_code.anvil_launcher import BUNDLED_ANVIL_VERSION, resolve_anvil_binary
+from brokk_code.anvil_launcher import resolve_anvil_binary
 from brokk_code.workspace import resolve_workspace_dir
 
 ANVIL_MODEL_CONFIG_ID = "model_selection"
@@ -41,7 +41,7 @@ class HeadlessAcpClient:
         *,
         workspace_dir: Path,
         anvil_binary: Path | None = None,
-        anvil_version: str = BUNDLED_ANVIL_VERSION,
+        anvil_version: str | None = None,
         default_model: str | None = None,
     ) -> None:
         self.workspace_dir = resolve_workspace_dir(workspace_dir)

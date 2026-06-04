@@ -85,6 +85,29 @@ def test_resolve_bifrost_binary_prefers_override(tmp_path) -> None:
     assert resolved == binary
 
 
+def test_resolve_bifrost_binary_uses_latest_release_when_version_omitted(
+    monkeypatch, tmp_path
+) -> None:
+    resolved_binary = tmp_path / "downloaded-bifrost"
+    resolved_binary.write_text("")
+
+    monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(rust_acp_install, "latest_github_release_version", lambda _repo: "6.6.6")
+
+    captured: dict[str, str] = {}
+
+    def fake_download(version: str) -> Path:
+        captured["version"] = version
+        return resolved_binary
+
+    monkeypatch.setattr(rust_acp_install, "_download_bifrost", fake_download)
+
+    resolved = rust_acp_install.resolve_bifrost_binary(override=None)
+
+    assert resolved == resolved_binary
+    assert captured["version"] == "6.6.6"
+
+
 def test_resolve_bifrost_binary_uses_path_when_available(monkeypatch, tmp_path) -> None:
     found = tmp_path / "bifrost"
     found.write_text("")
@@ -119,7 +142,7 @@ def test_resolve_bifrost_binary_skips_path_on_version_mismatch(monkeypatch, tmp_
     )
     monkeypatch.setattr(rust_acp_install, "_bifrost_cache_binary_path", fake_cache_path)
 
-    cached = fake_cache_path(rust_acp_install.BUNDLED_BIFROST_VERSION)
+    cached = fake_cache_path("8.8.8")
     cached.write_text("stub")
     cached.chmod(0o755)
 
@@ -128,7 +151,7 @@ def test_resolve_bifrost_binary_skips_path_on_version_mismatch(monkeypatch, tmp_
 
     monkeypatch.setattr(rust_acp_install, "_download_bifrost", fail_download)
 
-    resolved = rust_acp_install.resolve_bifrost_binary(override=None)
+    resolved = rust_acp_install.resolve_bifrost_binary(version="8.8.8", override=None)
     assert resolved == cached
 
 
@@ -193,7 +216,7 @@ def test_resolve_bifrost_binary_uses_cache_without_download(monkeypatch, tmp_pat
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _n: None)
     monkeypatch.setattr(rust_acp_install, "_bifrost_cache_binary_path", fake_cache_path)
 
-    cached = fake_cache_path(rust_acp_install.BUNDLED_BIFROST_VERSION)
+    cached = fake_cache_path("8.8.8")
     cached.write_text("stub")
     cached.chmod(0o755)
 
@@ -202,7 +225,7 @@ def test_resolve_bifrost_binary_uses_cache_without_download(monkeypatch, tmp_pat
 
     monkeypatch.setattr(rust_acp_install, "_download_bifrost", fail_download)
 
-    resolved = rust_acp_install.resolve_bifrost_binary(override=None)
+    resolved = rust_acp_install.resolve_bifrost_binary(version="8.8.8", override=None)
     assert resolved == cached
 
 
@@ -211,7 +234,7 @@ def test_bifrost_triple_rejects_intel_mac(monkeypatch) -> None:
     monkeypatch.setattr(rust_acp_install.platform, "machine", lambda: "x86_64")
 
     with pytest.raises(rust_acp_install.BifrostInstallError, match="Intel macOS"):
-        rust_acp_install._bifrost_triple()
+        rust_acp_install._bifrost_triple("8.8.8")
 
 
 def test_bifrost_triple_maps_known_platforms(monkeypatch) -> None:
@@ -225,7 +248,7 @@ def test_bifrost_triple_maps_known_platforms(monkeypatch) -> None:
     for system, machine, expected in cases:
         monkeypatch.setattr(rust_acp_install.platform, "system", lambda s=system: s)
         monkeypatch.setattr(rust_acp_install.platform, "machine", lambda m=machine: m)
-        assert rust_acp_install._bifrost_triple() == expected
+        assert rust_acp_install._bifrost_triple("8.8.8") == expected
 
 
 def test_parse_sha256_handles_both_formats(tmp_path) -> None:
@@ -274,12 +297,9 @@ def test_download_bifrost_extracts_and_caches(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(rust_acp_install, "_http_download", fake_http_download)
 
-    resolved = rust_acp_install._download_bifrost(rust_acp_install.BUNDLED_BIFROST_VERSION)
+    resolved = rust_acp_install._download_bifrost("8.8.8")
 
     assert resolved.exists()
     assert resolved.name == "bifrost"
     assert os.access(resolved, os.X_OK)
-    assert (
-        rust_acp_install.BUNDLED_BIFROST_VERSION in resolved.parts
-        and "x86_64-unknown-linux-gnu" in resolved.parts
-    )
+    assert "8.8.8" in resolved.parts and "x86_64-unknown-linux-gnu" in resolved.parts
