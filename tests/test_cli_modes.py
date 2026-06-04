@@ -2874,7 +2874,10 @@ async def test_run_commit_strips_anvil_welcome_message(monkeypatch, tmp_path) ->
     monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
 
     async def fake_anvil_text(**_kwargs: Any) -> str:
-        return 'Anvil found a working model setup and is ready to use.\nRun `/setup` anytime to change or repair model setup.{"message":"Fix generated commit message"}'
+        return (
+            "Anvil found a working model setup and is ready to use.\nRun `/setup`"
+            ' anytime to change or repair model setup.{"message":"Fix generated commit message"}'
+        )
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
