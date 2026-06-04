@@ -173,13 +173,7 @@ def _bifrost_triple(version: str) -> str:
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Darwin":
-        if machine in ("arm64", "aarch64"):
-            return "aarch64-apple-darwin"
-        raise BifrostInstallError(
-            f"bifrost v{version} does not ship an Intel macOS "
-            f"(x86_64-apple-darwin) binary. Detected machine: {machine}. "
-            "Install bifrost manually or run on an arm64 mac."
-        )
+        return "universal-apple-darwin"
     if system == "Android":
         return "aarch64-linux-android"
     if system == "Linux":
