@@ -74,6 +74,27 @@ def test_resolve_anvil_binary_uses_latest_release_when_version_omitted(
     assert captured["version"] == "7.7.7"
 
 
+def test_resolve_anvil_binary_redownloads_invalid_cached_binary(monkeypatch, tmp_path) -> None:
+    cached = tmp_path / "cache" / "anvil"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("corrupted")
+    cached.chmod(0o755)
+
+    replacement = tmp_path / "downloaded" / "anvil"
+    replacement.parent.mkdir()
+    replacement.write_text("replacement")
+    replacement.chmod(0o755)
+
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(anvil_launcher, "_anvil_cache_binary_path", lambda _version: cached)
+    monkeypatch.setattr(anvil_launcher, "_anvil_version_matches", lambda _path, _version: False)
+    monkeypatch.setattr(anvil_launcher, "_download_anvil", lambda _version: replacement)
+
+    resolved = anvil_launcher.resolve_anvil_binary(override=None)
+
+    assert resolved == replacement
+
+
 def test_download_anvil_redownloads_invalid_cache_after_lock(monkeypatch, tmp_path) -> None:
     target = tmp_path / "cache" / "anvil" / "0.9.2" / "fake-triple" / "anvil"
     target.parent.mkdir(parents=True)

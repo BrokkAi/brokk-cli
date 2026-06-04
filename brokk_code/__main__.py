@@ -1809,15 +1809,37 @@ def _passthrough_command_from_argv(argv: list[str]) -> tuple[str, list[str]] | N
     such as --worktree or --anvil-binary must therefore not be interpreted as
     Brokk-owned flags when they appear before those launcher commands.
     """
+    root_options_with_values = {"--anvil-binary", "--anvil-version"}
+    root_flags = {"--worktree"}
     help_flags = {"-h", "--help"}
 
-    for index, token in enumerate(argv):
+    index = 0
+    while index < len(argv):
+        token = argv[index]
         if token in help_flags:
             return None
-        if token == "acp" or token == "mcp":
-            return token, [*argv[:index], *argv[index + 1 :]]
+        if token == "--":
+            index += 1
+            break
+        if token in root_flags:
+            index += 1
+            continue
+        if token in root_options_with_values:
+            index += 2
+            continue
+        if any(token.startswith(f"{option}=") for option in root_options_with_values):
+            index += 1
+            continue
+        break
 
-    return None
+    if index >= len(argv):
+        return None
+
+    command = argv[index]
+    if command not in {"acp", "mcp"}:
+        return None
+
+    return command, [*argv[:index], *argv[index + 1 :]]
 
 
 def main():
@@ -2149,9 +2171,9 @@ def _main_dispatch(
         return
 
     if args.command == "mcp":
-        from brokk_code import bifrost_launcher as bifrost_launcher_module
+        from brokk_code.bifrost_launcher import run_bifrost_server
 
-        bifrost_launcher_module.run_bifrost_server(
+        run_bifrost_server(
             workspace_dir=workspace_path,
             passthrough_args=unknown,
         )
