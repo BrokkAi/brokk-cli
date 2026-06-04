@@ -2800,7 +2800,9 @@ async def test_run_commit_cleans_generated_markdown_fence(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_run_commit_requires_json_and_rejects_legacy_text(monkeypatch, tmp_path, capsys) -> None:
+async def test_run_commit_requires_json_and_rejects_legacy_text(
+    monkeypatch, tmp_path, capsys
+) -> None:
     heads = iter(["abc0000", "def1111"])
     monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
     monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
@@ -2840,7 +2842,9 @@ async def test_run_commit_extracts_generated_git_commit_command(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_run_commit_rejects_generated_git_commit_command(monkeypatch, tmp_path, capsys) -> None:
+async def test_run_commit_rejects_generated_git_commit_command(
+    monkeypatch, tmp_path, capsys
+) -> None:
     heads = iter(["abc0000", "def1111"])
     monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
     monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
