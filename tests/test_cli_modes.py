@@ -655,6 +655,44 @@ def test_main_mcp_does_not_consume_root_position_brokk_runtime_flags(monkeypatch
     ]
 
 
+def test_main_mcp_does_not_consume_root_position_brokk_runtime_flags(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {}
+
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    def fake_run_bifrost_server(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", fake_run_bifrost_server)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "--worktree",
+            "--anvil-binary",
+            "anvil-bin",
+            "--anvil-version",
+            "9.9.9",
+            "mcp",
+            "--debug",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["kwargs"]["workspace_dir"] == tmp_path.resolve()
+    assert captured["kwargs"]["passthrough_args"] == [
+        "--worktree",
+        "--anvil-binary",
+        "anvil-bin",
+        "--anvil-version",
+        "9.9.9",
+        "--debug",
+    ]
+
+
 def test_main_exec_resolves_workspace_to_repo_root(monkeypatch, tmp_path) -> None:
     captured: dict[str, Any] = {"ran": False}
     repo_root = tmp_path / "repo"
@@ -1124,12 +1162,10 @@ def test_main_install_mcp_routes_to_installer(monkeypatch, tmp_path, capsys) -> 
         "install_claude_mcp_summaries_skill",
         fake_install_claude_mcp_summaries_skill,
     )
-    monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/local/bin/uv")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["brokk", "install", "mcp", "--force"],
-    )
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
+
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", lambda **kwargs: None)
+
 
     main_module.main()
 
@@ -3418,38 +3454,9 @@ def test_install_zed_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> Non
 def test_install_mcp_skips_auth_prompt_without_key(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("BROKK_API_KEY", raising=False)
 
-    monkeypatch.setattr(main_module, "ensure_uv_ready", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(
-        main_module,
-        "configure_claude_code_mcp_settings",
-        lambda *, force=False, settings_path=None, uvx_command=None, **_kw: tmp_path / "c.json",
-    )
-    monkeypatch.setattr(
-        main_module,
-        "configure_codex_mcp_settings",
-        lambda *, force=False, settings_path=None, uvx_command=None, **_kw: tmp_path / "cx.toml",
-    )
-    monkeypatch.setattr(
-        main_module,
-        "install_codex_mcp_workspace_skill",
-        lambda **_kw: tmp_path / "s1",
-    )
-    monkeypatch.setattr(
-        main_module,
-        "install_codex_mcp_summaries_skill",
-        lambda **_kw: tmp_path / "s2",
-    )
-    monkeypatch.setattr(
-        main_module,
-        "install_claude_mcp_workspace_skill",
-        lambda **_kw: tmp_path / "s3",
-    )
-    monkeypatch.setattr(
-        main_module,
-        "install_claude_mcp_summaries_skill",
-        lambda **_kw: tmp_path / "s4",
-    )
+    from brokk_code import bifrost_launcher as bifrost_launcher_module
 
+    monkeypatch.setattr(bifrost_launcher_module, "run_bifrost_server", lambda **kwargs: None)
     monkeypatch.setattr(sys, "argv", ["brokk", "install", "mcp"])
     main_module.main()
 
