@@ -229,17 +229,10 @@ def test_resolve_bifrost_binary_uses_cache_without_download(monkeypatch, tmp_pat
     assert resolved == cached
 
 
-def test_bifrost_triple_rejects_intel_mac(monkeypatch) -> None:
-    monkeypatch.setattr(rust_acp_install.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(rust_acp_install.platform, "machine", lambda: "x86_64")
-
-    with pytest.raises(rust_acp_install.BifrostInstallError, match="Intel macOS"):
-        rust_acp_install._bifrost_triple("8.8.8")
-
-
 def test_bifrost_triple_maps_known_platforms(monkeypatch) -> None:
     cases = [
-        ("Darwin", "arm64", "aarch64-apple-darwin"),
+        ("Darwin", "arm64", "universal-apple-darwin"),
+        ("Darwin", "x86_64", "universal-apple-darwin"),
         ("Linux", "x86_64", "x86_64-unknown-linux-gnu"),
         ("Linux", "aarch64", "aarch64-unknown-linux-gnu"),
         ("Windows", "AMD64", "x86_64-pc-windows-msvc"),
@@ -249,6 +242,13 @@ def test_bifrost_triple_maps_known_platforms(monkeypatch) -> None:
         monkeypatch.setattr(rust_acp_install.platform, "system", lambda s=system: s)
         monkeypatch.setattr(rust_acp_install.platform, "machine", lambda m=machine: m)
         assert rust_acp_install._bifrost_triple("8.8.8") == expected
+
+
+def test_bifrost_triple_no_longer_rejects_intel_mac(monkeypatch) -> None:
+    monkeypatch.setattr(rust_acp_install.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(rust_acp_install.platform, "machine", lambda: "x86_64")
+
+    assert rust_acp_install._bifrost_triple("8.8.8") == "universal-apple-darwin"
 
 
 def test_parse_sha256_handles_both_formats(tmp_path) -> None:
