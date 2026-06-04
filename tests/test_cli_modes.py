@@ -2800,22 +2800,24 @@ async def test_run_commit_cleans_generated_markdown_fence(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_run_commit_falls_back_to_cleaning_legacy_text(monkeypatch, tmp_path) -> None:
-    calls: list[tuple[str, ...]] = []
+async def test_run_commit_requires_json_and_rejects_legacy_text(monkeypatch, tmp_path, capsys) -> None:
     heads = iter(["abc0000", "def1111"])
     monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
     monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
     monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
-    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: "")
 
     async def fake_anvil_text(**_kwargs: Any) -> str:
         return "```text\nFix generated commit message\n```"
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
-    await main_module.run_commit(workspace_dir=tmp_path, message=None)
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_commit(workspace_dir=tmp_path, message=None)
 
-    assert ("commit", "-m", "Fix generated commit message") in calls
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "valid JSON object" in captured.err
 
 
 @pytest.mark.asyncio
@@ -2828,7 +2830,7 @@ async def test_run_commit_extracts_generated_git_commit_command(monkeypatch, tmp
     monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
 
     async def fake_anvil_text(**_kwargs: Any) -> str:
-        return '```bash\ngit commit -m "Fix generated commit message"\n```'
+        return '```json\n{"message": "Fix generated commit message"}\n```'
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
@@ -2838,24 +2840,24 @@ async def test_run_commit_extracts_generated_git_commit_command(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_run_commit_falls_back_for_generated_git_commit_command(
-    monkeypatch, tmp_path
-) -> None:
-    calls: list[tuple[str, ...]] = []
+async def test_run_commit_rejects_generated_git_commit_command(monkeypatch, tmp_path, capsys) -> None:
     heads = iter(["abc0000", "def1111"])
     monkeypatch.setattr(main_module, "_git_head", lambda _workspace: next(heads))
     monkeypatch.setattr(main_module, "_git_status_porcelain", lambda _workspace: " M file.py")
     monkeypatch.setattr(main_module, "_git_output", lambda _workspace, *args: "file.py")
-    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
+    monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: "")
 
     async def fake_anvil_text(**_kwargs: Any) -> str:
         return 'git commit -m "Fix generated commit message"'
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
-    await main_module.run_commit(workspace_dir=tmp_path, message=None)
+    with pytest.raises(SystemExit) as exc:
+        await main_module.run_commit(workspace_dir=tmp_path, message=None)
 
-    assert ("commit", "-m", "Fix generated commit message") in calls
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "valid JSON object" in captured.err
 
 
 @pytest.mark.asyncio
@@ -2868,10 +2870,7 @@ async def test_run_commit_strips_anvil_welcome_message(monkeypatch, tmp_path) ->
     monkeypatch.setattr(main_module, "_run_git", lambda _workspace, *args: calls.append(args) or "")
 
     async def fake_anvil_text(**_kwargs: Any) -> str:
-        return (
-            "Anvil is ready. Run `/setup` anytime to change or repair model setup.\n"
-            "Fix generated commit message"
-        )
+        return 'Anvil found a working model setup and is ready to use.\nRun `/setup` anytime to change or repair model setup.{"message":"Fix generated commit message"}'
 
     monkeypatch.setattr(main_module, "_run_anvil_text_prompt", fake_anvil_text)
 
@@ -2887,6 +2886,16 @@ def test_clean_generated_commit_message_strips_anvil_welcome_line() -> None:
     )
 
     assert cleaned == "Fix generated commit message"
+
+
+def test_extract_json_object_strips_multiline_anvil_banner() -> None:
+    parsed = main_module._extract_json_object(
+        "Anvil found a working model setup and is ready to use.\n"
+        "Run `/setup` anytime to change or repair model setup.\n"
+        '{"message":"Fix generated commit message"}'
+    )
+
+    assert parsed == {"message": "Fix generated commit message"}
 
 
 @pytest.mark.asyncio

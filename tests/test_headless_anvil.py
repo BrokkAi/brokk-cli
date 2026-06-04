@@ -109,12 +109,12 @@ def test_build_pr_review_prompt_includes_threshold() -> None:
     assert "severity >= MEDIUM" in prompt
 
 
-def test_build_commit_prompt_includes_contract_and_message() -> None:
-    prompt = build_commit_prompt(message="Fix parser bug")
+def test_build_commit_prompt_without_message_requests_json_only() -> None:
+    prompt = build_commit_prompt()
 
-    assert '"message": "Fix parser bug"' in prompt
-    assert "Output only a JSON object" in prompt or "Return only a JSON object" in prompt
-    assert "commit" in prompt.lower()
+    assert "Inspect the staged and unstaged repository changes" in prompt
+    assert '"message": "Commit message"' in prompt
+    assert "Do not stage files, do not commit, and do not run git." in prompt
 
 
 def test_headless_anvil_env_strips_sensitive_auth_tokens(monkeypatch) -> None:
@@ -153,6 +153,28 @@ def test_session_update_to_event_maps_anvil_ready_message_to_notification() -> N
     assert event == {
         "type": "NOTIFICATION",
         "data": {"level": "INFO", "message": ANVIL_READY_MESSAGE},
+    }
+
+
+def test_session_update_to_event_maps_new_anvil_ready_banner_to_notification() -> None:
+    banner = "Anvil found a working model setup and is ready to use."
+
+    event = _session_update_to_event(update_agent_message_text(banner))
+
+    assert event == {
+        "type": "NOTIFICATION",
+        "data": {"level": "INFO", "message": banner},
+    }
+
+
+def test_session_update_to_event_maps_setup_followup_to_notification() -> None:
+    followup = "Run `/setup` anytime to change or repair model setup."
+
+    event = _session_update_to_event(update_agent_message_text(followup))
+
+    assert event == {
+        "type": "NOTIFICATION",
+        "data": {"level": "INFO", "message": followup},
     }
 
 
