@@ -112,6 +112,7 @@ def test_resolve_bifrost_binary_uses_path_when_available(monkeypatch, tmp_path) 
     found = tmp_path / "bifrost"
     found.write_text("")
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: str(found))
+    monkeypatch.setattr(rust_acp_install, "latest_github_release_version", lambda _repo: "6.6.6")
     monkeypatch.setattr(
         rust_acp_install,
         "_bifrost_version_matches",
