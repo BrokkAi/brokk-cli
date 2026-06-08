@@ -9,6 +9,11 @@ from typing import Iterator, Optional, Tuple
 
 _GITHUB_HTTPS_REGEX = r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$"
 _GITHUB_SSH_REGEX = r"^git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$"
+_GITHUB_PR_URL_REGEX = (
+    r"^https://github\.com/"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)"
+    r"(?:/files)?(?:/)?(?:[?#].*)?$"
+)
 
 
 def infer_github_repo_from_remote(workspace_dir: Path) -> Tuple[Optional[str], Optional[str]]:
@@ -45,6 +50,16 @@ def infer_github_repo_from_remote(workspace_dir: Path) -> Tuple[Optional[str], O
         return (None, None)
     except Exception:
         return (None, None)
+
+
+def parse_github_pr_url(url: str) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+    """Parses a GitHub pull request URL into owner, repo, and PR number."""
+    match = re.match(_GITHUB_PR_URL_REGEX, url.strip())
+    if not match:
+        return (None, None, None)
+
+    owner, repo, pr_number_raw = match.groups()
+    return (owner, repo, int(pr_number_raw))
 
 
 # --- Worktree support ---

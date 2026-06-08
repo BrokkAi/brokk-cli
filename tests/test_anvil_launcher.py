@@ -86,6 +86,7 @@ def test_resolve_anvil_binary_redownloads_invalid_cached_binary(monkeypatch, tmp
     replacement.chmod(0o755)
 
     monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(anvil_launcher, "latest_github_release_version", lambda _repo: "7.7.7")
     monkeypatch.setattr(anvil_launcher, "_anvil_cache_binary_path", lambda _version: cached)
     monkeypatch.setattr(anvil_launcher, "_anvil_version_matches", lambda _path, _version: False)
     monkeypatch.setattr(anvil_launcher, "_download_anvil", lambda _version: replacement)
