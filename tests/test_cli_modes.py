@@ -3003,7 +3003,112 @@ def test_main_pr_review_missing_pr_number_exits_nonzero(monkeypatch, tmp_path) -
     with pytest.raises(SystemExit) as exc:
         main_module.main()
 
-    assert exc.value.code != 0
+    assert exc.value.code == 1
+
+
+def test_main_pr_review_extracts_all_params_from_pr_url(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {"ran": False}
+
+    async def fake_run_pr_review_job(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+        captured["ran"] = True
+
+    monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "pr",
+            "review",
+            "https://github.com/BrokkAi/mjolnir/pull/118",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["ran"] is True
+    assert captured["kwargs"]["pr_number"] == 118
+    assert captured["kwargs"]["repo_owner"] == "BrokkAi"
+    assert captured["kwargs"]["repo_name"] == "mjolnir"
+
+
+def test_main_pr_review_explicit_params_override_positional_pr_url(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {"ran": False}
+
+    async def fake_run_pr_review_job(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+        captured["ran"] = True
+
+    monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "pr",
+            "review",
+            "https://github.com/BrokkAi/mjolnir/pull/118",
+            "--pr-number",
+            "42",
+            "--repo-owner",
+            "acme",
+            "--repo-name",
+            "tools",
+        ],
+    )
+
+    main_module.main()
+
+    assert captured["ran"] is True
+    assert captured["kwargs"]["pr_number"] == 42
+    assert captured["kwargs"]["repo_owner"] == "acme"
+    assert captured["kwargs"]["repo_name"] == "tools"
+
+
+def test_main_pr_review_invalid_positional_pr_target_exits_nonzero(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brokk",
+            "pr",
+            "review",
+            "https://github.com/BrokkAi/mjolnir/issues/118",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main()
+
+    assert exc.value.code == 1
+
+
+def test_main_pr_review_accepts_positional_pr_number(monkeypatch, tmp_path) -> None:
+    captured: dict[str, Any] = {"ran": False}
+
+    async def fake_run_pr_review_job(**kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+        captured["ran"] = True
+
+    monkeypatch.setattr(main_module, "run_pr_review_job", fake_run_pr_review_job)
+    monkeypatch.setattr(main_module, "infer_github_repo_from_remote", lambda _: ("acme", "tools"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["brokk", "pr", "review", "118"],
+    )
+
+    main_module.main()
+
+    assert captured["ran"] is True
+    assert captured["kwargs"]["pr_number"] == 118
+    assert captured["kwargs"]["repo_owner"] == "acme"
+    assert captured["kwargs"]["repo_name"] == "tools"
 
 
 def test_main_pr_review_missing_repo_owner_without_inference_exits_nonzero(
@@ -3205,6 +3310,26 @@ def test_infer_github_repo_from_remote_https_format(monkeypatch, tmp_path) -> No
 
     assert owner == "test-owner"
     assert repo == "test-repo"
+
+
+def test_parse_github_pr_url_returns_owner_repo_and_number() -> None:
+    owner, repo, pr_number = git_utils_module.parse_github_pr_url(
+        "https://github.com/BrokkAi/mjolnir/pull/118"
+    )
+
+    assert owner == "BrokkAi"
+    assert repo == "mjolnir"
+    assert pr_number == 118
+
+
+def test_parse_github_pr_url_rejects_non_pr_urls() -> None:
+    owner, repo, pr_number = git_utils_module.parse_github_pr_url(
+        "https://github.com/BrokkAi/mjolnir/issues/118"
+    )
+
+    assert owner is None
+    assert repo is None
+    assert pr_number is None
 
 
 def test_infer_github_repo_from_remote_https_no_git_suffix(monkeypatch, tmp_path) -> None:

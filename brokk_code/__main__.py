@@ -23,7 +23,7 @@ from brokk_code.anvil_config import (
 from brokk_code.anvil_launcher import run_anvil_acp_server
 from brokk_code.avante_config import configure_nvim_avante_acp_settings
 from brokk_code.event_utils import is_failure_state, safe_data
-from brokk_code.git_utils import infer_github_repo_from_remote
+from brokk_code.git_utils import infer_github_repo_from_remote, parse_github_pr_url
 from brokk_code.headless_anvil import (
     ANVIL_READY_MESSAGE,
     HeadlessAcpClient,
@@ -1175,9 +1175,15 @@ def _build_parser() -> argparse.ArgumentParser:
     pr_review_parser = pr_subparsers.add_parser("review", help="Review a pull request")
     _add_common_runtime_args(pr_review_parser)
     pr_review_parser.add_argument(
+        "pr_target",
+        nargs="?",
+        default=None,
+        help="Pull request number or GitHub pull request URL",
+    )
+    pr_review_parser.add_argument(
         "--pr-number",
         type=int,
-        required=True,
+        default=None,
         help="The pull request number to review",
     )
     pr_review_parser.add_argument(
@@ -2259,6 +2265,25 @@ def _main_dispatch(
         if args.pr_command == "review":
             repo_owner = args.repo_owner
             repo_name = args.repo_name
+            pr_number = args.pr_number
+            if args.pr_target:
+                parsed_owner, parsed_repo, parsed_pr_number = parse_github_pr_url(args.pr_target)
+                if parsed_owner and parsed_repo and parsed_pr_number is not None:
+                    if not repo_owner:
+                        repo_owner = parsed_owner
+                    if not repo_name:
+                        repo_name = parsed_repo
+                    if pr_number is None:
+                        pr_number = parsed_pr_number
+                elif pr_number is None:
+                    try:
+                        pr_number = int(args.pr_target)
+                    except ValueError:
+                        _die(f"Invalid pull request reference '{args.pr_target}'")
+
+            if pr_number is None:
+                _die("A pull request number or GitHub pull request URL is required")
+
             if not repo_owner or not repo_name:
                 inferred_owner, inferred_repo = infer_github_repo_from_remote(workspace_path)
                 if not repo_owner:
@@ -2279,7 +2304,7 @@ def _main_dispatch(
             asyncio.run(
                 run_pr_review_job(
                     workspace_dir=workspace_path,
-                    pr_number=args.pr_number,
+                    pr_number=pr_number,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
                     model=selection.model,
