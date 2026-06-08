@@ -1,5 +1,7 @@
 from pathlib import Path
+import urllib.request
 
+import httpx
 import pytest
 
 
@@ -19,3 +21,16 @@ def isolate_home(tmp_path, monkeypatch):
     cwd = tmp_path / "cwd"
     cwd.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(cwd)
+
+
+@pytest.fixture(autouse=True)
+def block_network(monkeypatch):
+    """Fail fast on unmocked outbound network access in tests."""
+
+    def _blocked(*_args, **_kwargs):
+        raise AssertionError("Tests must not perform outbound network calls. Mock the request.")
+
+    monkeypatch.setattr(httpx, "get", _blocked)
+    monkeypatch.setattr(httpx, "request", _blocked)
+    monkeypatch.setattr(httpx.Client, "request", _blocked)
+    monkeypatch.setattr(urllib.request, "urlopen", _blocked)
