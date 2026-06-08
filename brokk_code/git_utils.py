@@ -12,7 +12,7 @@ _GITHUB_SSH_REGEX = r"^git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.
 _GITHUB_PR_URL_REGEX = (
     r"^https://github\.com/"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)"
-    r"(?:/)?(?:[?#].*)?$"
+    r"(?:/files)?(?:/)?(?:[?#].*)?$"
 )
 
 

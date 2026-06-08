@@ -3322,6 +3322,16 @@ def test_parse_github_pr_url_returns_owner_repo_and_number() -> None:
     assert pr_number == 118
 
 
+def test_parse_github_pr_url_accepts_files_tab_url() -> None:
+    owner, repo, pr_number = git_utils_module.parse_github_pr_url(
+        "https://github.com/BrokkAi/mjolnir/pull/118/files#diff-123"
+    )
+
+    assert owner == "BrokkAi"
+    assert repo == "mjolnir"
+    assert pr_number == 118
+
+
 def test_parse_github_pr_url_rejects_non_pr_urls() -> None:
     owner, repo, pr_number = git_utils_module.parse_github_pr_url(
         "https://github.com/BrokkAi/mjolnir/issues/118"
