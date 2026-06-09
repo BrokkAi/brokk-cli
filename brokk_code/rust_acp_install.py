@@ -22,6 +22,7 @@ import hashlib
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -96,16 +97,25 @@ def resolve_bifrost_binary(
     *,
     version: str | None = None,
     override: Path | None = None,
+    prefer_local: bool = False,
 ) -> Path:
     """Resolve the bifrost binary path.
 
     Order: override > matching $PATH > cached release > download release.
-    When ``version`` is omitted, Brokk resolves the latest GitHub release dynamically.
+    When ``version`` is omitted, Brokk resolves the latest GitHub release dynamically
+    unless ``prefer_local`` is true, in which case any local install/cache is reused
+    before Brokk attempts network resolution.
     """
     if override is not None:
         return _validate_existing_file(override, "bifrost")
 
-    resolved_version = _resolve_bifrost_version(version)
+    normalized_version = (version or "").strip().removeprefix("v")
+    if prefer_local and not normalized_version:
+        local_binary = _find_local_bifrost_binary()
+        if local_binary is not None:
+            return local_binary
+
+    resolved_version = _resolve_bifrost_version(normalized_version or None)
 
     on_path = shutil.which("bifrost")
     if on_path:
@@ -134,6 +144,42 @@ def _resolve_bifrost_version(version: str | None) -> str:
         return latest_github_release_version(_BIFROST_GITHUB_REPO)
     except ReleaseResolverError as exc:
         raise BifrostInstallError(f"Failed to resolve latest bifrost release: {exc}") from exc
+
+
+def _find_local_bifrost_binary() -> Path | None:
+    on_path = shutil.which("bifrost")
+    if on_path:
+        return Path(on_path)
+    return _latest_cached_bifrost_binary()
+
+
+def _latest_cached_bifrost_binary() -> Path | None:
+    cache_root = get_global_cache_dir() / "bifrost"
+    if not cache_root.exists():
+        return None
+
+    triple = _bifrost_triple("unknown")
+    filename = _bifrost_binary_filename()
+    candidates: list[tuple[str, Path]] = []
+    for version_dir in cache_root.iterdir():
+        if not version_dir.is_dir():
+            continue
+        candidate = version_dir / triple / filename
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            candidates.append((version_dir.name, candidate))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: _version_sort_key(item[0]), reverse=True)
+    return candidates[0][1]
+
+
+def _version_sort_key(version: str) -> tuple[tuple[int, int | str], ...]:
+    tokens = [token for token in re.split(r"[^0-9A-Za-z]+", version) if token]
+    if not tokens:
+        return ((1, version.lower()),)
+    return tuple((0, int(token)) if token.isdigit() else (1, token.lower()) for token in tokens)
 
 
 def _bifrost_version_matches(binary_path: Path, expected_version: str) -> bool:

@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -47,7 +48,11 @@ def run_anvil_acp_server(
     launcher = "anvil"
 
     try:
-        binary = resolve_anvil_binary(version=version, override=binary_override)
+        binary = resolve_anvil_binary(
+            version=version,
+            override=binary_override,
+            prefer_local=version is None,
+        )
         launcher = str(binary)
         command = [str(binary)]
         if passthrough_args:
@@ -88,17 +93,25 @@ def resolve_anvil_binary(
     *,
     version: str | None = None,
     override: Path | None = None,
+    prefer_local: bool = False,
 ) -> Path:
     """Resolve the Anvil binary path.
 
     Order: override > matching $PATH binary > cached release > downloaded release.
     When ``version`` is omitted, Brokk resolves the latest GitHub release dynamically,
-    then still reuses a matching $PATH or cached binary before downloading anything.
+    unless ``prefer_local`` is true, in which case any local install/cache is reused
+    before Brokk attempts network resolution.
     """
     if override is not None:
         return _validate_existing_file(override, "anvil")
 
-    resolved_version = _resolve_anvil_version(version)
+    normalized_version = (version or "").strip().removeprefix("v")
+    if prefer_local and not normalized_version:
+        local_binary = _find_local_anvil_binary()
+        if local_binary is not None:
+            return local_binary
+
+    resolved_version = _resolve_anvil_version(normalized_version or None)
 
     on_path = shutil.which("anvil")
     if on_path:
@@ -133,6 +146,42 @@ def _resolve_anvil_version(version: str | None) -> str:
         return latest_github_release_version(_ANVIL_GITHUB_REPO)
     except ReleaseResolverError as exc:
         raise AnvilInstallError(f"Failed to resolve latest Anvil release: {exc}") from exc
+
+
+def _find_local_anvil_binary() -> Path | None:
+    on_path = shutil.which("anvil")
+    if on_path:
+        return Path(on_path)
+    return _latest_cached_anvil_binary()
+
+
+def _latest_cached_anvil_binary() -> Path | None:
+    cache_root = get_global_cache_dir() / "anvil"
+    if not cache_root.exists():
+        return None
+
+    triple = _anvil_triple("unknown")
+    filename = _anvil_binary_filename()
+    candidates: list[tuple[str, Path]] = []
+    for version_dir in cache_root.iterdir():
+        if not version_dir.is_dir():
+            continue
+        candidate = version_dir / triple / filename
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            candidates.append((version_dir.name, candidate))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: _version_sort_key(item[0]), reverse=True)
+    return candidates[0][1]
+
+
+def _version_sort_key(version: str) -> tuple[tuple[int, int | str], ...]:
+    tokens = [token for token in re.split(r"[^0-9A-Za-z]+", version) if token]
+    if not tokens:
+        return ((1, version.lower()),)
+    return tuple((0, int(token)) if token.isdigit() else (1, token.lower()) for token in tokens)
 
 
 def _validate_existing_file(path: Path, name: str) -> Path:
