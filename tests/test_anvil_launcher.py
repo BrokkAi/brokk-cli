@@ -42,6 +42,34 @@ def test_run_anvil_acp_server_uses_override_and_execs_binary(monkeypatch, tmp_pa
     assert "BROKK_TEST_SECRET" not in captured["env"]
 
 
+def test_run_anvil_acp_server_prefers_local_binary_when_version_omitted(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, object] = {}
+
+    binary = tmp_path / "anvil"
+    binary.write_text("stub")
+    binary.chmod(0o755)
+
+    def fake_resolve(**kwargs: object) -> Path:
+        captured["resolve_kwargs"] = kwargs
+        return binary
+
+    monkeypatch.setattr(anvil_launcher, "resolve_anvil_binary", fake_resolve)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "chdir", lambda _path: None)
+    monkeypatch.setattr(os, "execvpe", lambda *_args: (_ for _ in ()).throw(RuntimeError("stop")))
+
+    with pytest.raises(RuntimeError, match="stop"):
+        anvil_launcher.run_anvil_acp_server(workspace_dir=tmp_path)
+
+    assert captured["resolve_kwargs"] == {
+        "version": None,
+        "override": None,
+        "prefer_local": True,
+    }
+
+
 def test_resolve_anvil_binary_prefers_override(tmp_path) -> None:
     binary = tmp_path / "custom-anvil"
     binary.write_text("")
@@ -72,6 +100,54 @@ def test_resolve_anvil_binary_uses_latest_release_when_version_omitted(
 
     assert resolved == resolved_binary
     assert captured["version"] == "7.7.7"
+
+
+def test_resolve_anvil_binary_prefers_path_when_local_fallback_requested(
+    monkeypatch, tmp_path
+) -> None:
+    found = tmp_path / "anvil"
+    found.write_text("")
+
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: str(found))
+    monkeypatch.setattr(
+        anvil_launcher,
+        "latest_github_release_version",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("must not resolve latest release")),
+    )
+
+    resolved = anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
+
+    assert resolved == found
+
+
+def test_resolve_anvil_binary_uses_latest_cached_binary_when_local_fallback_requested(
+    monkeypatch, tmp_path
+) -> None:
+    cache_root = tmp_path / "cache"
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("brokk_code.anvil_launcher.get_global_cache_dir", lambda: cache_root)
+    monkeypatch.setattr(anvil_launcher, "_anvil_triple", lambda _version: "fake-triple")
+    monkeypatch.setattr(
+        anvil_launcher,
+        "latest_github_release_version",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("must not resolve latest release")),
+    )
+
+    binary_name = anvil_launcher._anvil_binary_filename()
+
+    older = cache_root / "anvil" / "1.2.3" / "fake-triple" / binary_name
+    older.parent.mkdir(parents=True)
+    older.write_text("old")
+    older.chmod(0o755)
+
+    newer = cache_root / "anvil" / "1.10.0" / "fake-triple" / binary_name
+    newer.parent.mkdir(parents=True)
+    newer.write_text("new")
+    newer.chmod(0o755)
+
+    resolved = anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
+
+    assert resolved == newer
 
 
 def test_resolve_anvil_binary_redownloads_invalid_cached_binary(monkeypatch, tmp_path) -> None:

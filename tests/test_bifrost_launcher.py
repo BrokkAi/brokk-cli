@@ -39,6 +39,30 @@ def test_run_bifrost_server_uses_override_and_execs_bifrost(monkeypatch, tmp_pat
     assert captured["command"] == [str(binary)]
 
 
+def test_run_bifrost_server_prefers_local_binary_when_version_omitted(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, object] = {}
+
+    binary = tmp_path / "bifrost"
+    binary.write_text("stub")
+    binary.chmod(0o755)
+
+    def fake_resolve(**kwargs: object) -> Path:
+        captured["resolve_kwargs"] = kwargs
+        return binary
+
+    monkeypatch.setattr(bifrost_launcher, "resolve_bifrost_binary", fake_resolve)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "chdir", lambda _p: None)
+    monkeypatch.setattr(os, "execvpe", lambda *_a: (_ for _ in ()).throw(RuntimeError("stop")))
+
+    with pytest.raises(RuntimeError, match="stop"):
+        bifrost_launcher.run_bifrost_server(workspace_dir=tmp_path)
+
+    assert captured["resolve_kwargs"] == {"override": None, "prefer_local": True}
+
+
 def test_run_bifrost_server_forwards_passthrough_args(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
@@ -106,6 +130,54 @@ def test_resolve_bifrost_binary_uses_latest_release_when_version_omitted(
 
     assert resolved == resolved_binary
     assert captured["version"] == "6.6.6"
+
+
+def test_resolve_bifrost_binary_prefers_path_when_local_fallback_requested(
+    monkeypatch, tmp_path
+) -> None:
+    found = tmp_path / "bifrost"
+    found.write_text("")
+
+    monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: str(found))
+    monkeypatch.setattr(
+        rust_acp_install,
+        "latest_github_release_version",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("must not resolve latest release")),
+    )
+
+    resolved = rust_acp_install.resolve_bifrost_binary(override=None, prefer_local=True)
+
+    assert resolved == found
+
+
+def test_resolve_bifrost_binary_uses_latest_cached_binary_when_local_fallback_requested(
+    monkeypatch, tmp_path
+) -> None:
+    cache_root = tmp_path / "cache"
+    monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("brokk_code.rust_acp_install.get_global_cache_dir", lambda: cache_root)
+    monkeypatch.setattr(rust_acp_install, "_bifrost_triple", lambda _version: "fake-triple")
+    monkeypatch.setattr(
+        rust_acp_install,
+        "latest_github_release_version",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("must not resolve latest release")),
+    )
+
+    binary_name = rust_acp_install._bifrost_binary_filename()
+
+    older = cache_root / "bifrost" / "1.2.3" / "fake-triple" / binary_name
+    older.parent.mkdir(parents=True)
+    older.write_text("old")
+    older.chmod(0o755)
+
+    newer = cache_root / "bifrost" / "1.10.0" / "fake-triple" / binary_name
+    newer.parent.mkdir(parents=True)
+    newer.write_text("new")
+    newer.chmod(0o755)
+
+    resolved = rust_acp_install.resolve_bifrost_binary(override=None, prefer_local=True)
+
+    assert resolved == newer
 
 
 def test_resolve_bifrost_binary_uses_path_when_available(monkeypatch, tmp_path) -> None:

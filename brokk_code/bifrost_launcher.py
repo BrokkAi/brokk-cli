@@ -29,7 +29,7 @@ def run_bifrost_server(
     resolved_workspace_dir = resolve_workspace_dir(workspace_dir)
 
     try:
-        bifrost_bin = resolve_bifrost_binary(override=None)
+        bifrost_bin = resolve_bifrost_binary(override=None, prefer_local=True)
     except (RustAcpInstallError, BifrostInstallError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
