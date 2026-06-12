@@ -97,21 +97,34 @@ def resolve_anvil_binary(
 ) -> Path:
     """Resolve the Anvil binary path.
 
-    Order: override > matching $PATH binary > cached release > downloaded release.
-    When ``version`` is omitted, Brokk resolves the latest GitHub release dynamically,
-    unless ``prefer_local`` is true, in which case any local install/cache is reused
-    before Brokk attempts network resolution.
+    Order: override > matching $PATH binary > matching cached release > downloaded
+    release. When ``version`` is omitted, Brokk always checks GitHub for the latest
+    release so newer versions are applied automatically (auto-update). ``prefer_local``
+    enables graceful degradation: if the latest-release lookup or the download fails
+    (e.g. offline), Brokk falls back to any already-installed local binary instead of
+    erroring. Brokk only errors when no version can be resolved/downloaded *and* no
+    local binary is present.
     """
     if override is not None:
         return _validate_existing_file(override, "anvil")
 
     normalized_version = (version or "").strip().removeprefix("v")
-    if prefer_local and not normalized_version:
-        local_binary = _find_local_anvil_binary()
-        if local_binary is not None:
-            return local_binary
 
-    resolved_version = _resolve_anvil_version(normalized_version or None)
+    # Always resolve the target version first so a newer release is picked up. When
+    # no explicit version was requested this hits GitHub; if that fails (offline),
+    # degrade to a local binary rather than blocking startup.
+    try:
+        resolved_version = _resolve_anvil_version(normalized_version or None)
+    except AnvilInstallError:
+        if prefer_local and not normalized_version:
+            local_binary = _find_local_anvil_binary()
+            if local_binary is not None:
+                logger.info(
+                    "Could not resolve latest Anvil release; using local binary at %s",
+                    local_binary,
+                )
+                return local_binary
+        raise
 
     on_path = shutil.which("anvil")
     if on_path:
@@ -134,7 +147,21 @@ def resolve_anvil_binary(
             resolved_version,
         )
 
-    return _download_anvil(resolved_version)
+    # No local binary matches the target version, so download it. If the download
+    # fails but a local binary exists, degrade gracefully to it instead of erroring.
+    try:
+        return _download_anvil(resolved_version)
+    except AnvilInstallError:
+        if prefer_local:
+            local_binary = _find_local_anvil_binary()
+            if local_binary is not None:
+                logger.warning(
+                    "Failed to download Anvil %s; falling back to local binary at %s",
+                    resolved_version,
+                    local_binary,
+                )
+                return local_binary
+        raise
 
 
 def _resolve_anvil_version(version: str | None) -> str:

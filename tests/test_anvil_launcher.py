@@ -102,9 +102,71 @@ def test_resolve_anvil_binary_uses_latest_release_when_version_omitted(
     assert captured["version"] == "7.7.7"
 
 
-def test_resolve_anvil_binary_prefers_path_when_local_fallback_requested(
+# ---------------------------------------------------------------------------
+# Auto-update contract: with no explicit version (the normal ACP/headless path)
+#   1. newer release available  -> update is downloaded and used
+#   2. no newer release          -> existing local binary is used, nothing downloaded
+#   3. version check / download fails (offline) -> degrade to local binary, no error
+#   4. nothing reachable AND no local binary    -> error
+# `prefer_local=True` is what run_anvil_acp_server passes when version is None.
+# ---------------------------------------------------------------------------
+
+
+def test_contract1_downloads_update_when_newer_release_available(monkeypatch, tmp_path) -> None:
+    """A newer release than the locally-installed binary triggers a download."""
+    stale_local = tmp_path / "stale" / "anvil"
+    stale_local.parent.mkdir()
+    stale_local.write_text("old")
+    stale_local.chmod(0o755)
+
+    downloaded = tmp_path / "downloaded" / "anvil"
+    downloaded.parent.mkdir()
+    downloaded.write_text("new")
+    downloaded.chmod(0o755)
+
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: str(stale_local))
+    monkeypatch.setattr(anvil_launcher, "latest_github_release_version", lambda _repo: "2.0.0")
+    # The on-$PATH binary is an older version, so it does not match the latest.
+    monkeypatch.setattr(anvil_launcher, "_anvil_version_matches", lambda _path, _version: False)
+
+    captured: dict[str, str] = {}
+
+    def fake_download(version: str) -> Path:
+        captured["version"] = version
+        return downloaded
+
+    monkeypatch.setattr(anvil_launcher, "_download_anvil", fake_download)
+
+    resolved = anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
+
+    assert resolved == downloaded
+    assert captured["version"] == "2.0.0"
+
+
+def test_contract2_uses_local_when_no_newer_release(monkeypatch, tmp_path) -> None:
+    """When the local binary already matches the latest release, nothing is downloaded."""
+    local = tmp_path / "anvil"
+    local.write_text("current")
+    local.chmod(0o755)
+
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: str(local))
+    monkeypatch.setattr(anvil_launcher, "latest_github_release_version", lambda _repo: "2.0.0")
+    monkeypatch.setattr(anvil_launcher, "_anvil_version_matches", lambda _path, _version: True)
+    monkeypatch.setattr(
+        anvil_launcher,
+        "_download_anvil",
+        lambda _version: (_ for _ in ()).throw(AssertionError("must not download")),
+    )
+
+    resolved = anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
+
+    assert resolved == local
+
+
+def test_contract3_falls_back_to_path_binary_when_release_check_fails(
     monkeypatch, tmp_path
 ) -> None:
+    """Network/version-check failure degrades to the local $PATH binary, no error."""
     found = tmp_path / "anvil"
     found.write_text("")
 
@@ -112,7 +174,7 @@ def test_resolve_anvil_binary_prefers_path_when_local_fallback_requested(
     monkeypatch.setattr(
         anvil_launcher,
         "latest_github_release_version",
-        lambda _repo: (_ for _ in ()).throw(AssertionError("must not resolve latest release")),
+        lambda _repo: (_ for _ in ()).throw(anvil_launcher.ReleaseResolverError("offline")),
     )
 
     resolved = anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
@@ -120,9 +182,10 @@ def test_resolve_anvil_binary_prefers_path_when_local_fallback_requested(
     assert resolved == found
 
 
-def test_resolve_anvil_binary_uses_latest_cached_binary_when_local_fallback_requested(
+def test_contract3_falls_back_to_latest_cached_binary_when_release_check_fails(
     monkeypatch, tmp_path
 ) -> None:
+    """With no $PATH binary, an offline run degrades to the newest cached binary."""
     cache_root = tmp_path / "cache"
     monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: None)
     monkeypatch.setattr("brokk_code.anvil_launcher.get_global_cache_dir", lambda: cache_root)
@@ -130,7 +193,7 @@ def test_resolve_anvil_binary_uses_latest_cached_binary_when_local_fallback_requ
     monkeypatch.setattr(
         anvil_launcher,
         "latest_github_release_version",
-        lambda _repo: (_ for _ in ()).throw(AssertionError("must not resolve latest release")),
+        lambda _repo: (_ for _ in ()).throw(anvil_launcher.ReleaseResolverError("offline")),
     )
 
     binary_name = anvil_launcher._anvil_binary_filename()
@@ -148,6 +211,42 @@ def test_resolve_anvil_binary_uses_latest_cached_binary_when_local_fallback_requ
     resolved = anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
 
     assert resolved == newer
+
+
+def test_contract3_falls_back_to_local_when_download_fails(monkeypatch, tmp_path) -> None:
+    """A failed download of a newer release degrades to the existing local binary."""
+    local = tmp_path / "anvil"
+    local.write_text("old")
+    local.chmod(0o755)
+
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: str(local))
+    monkeypatch.setattr(anvil_launcher, "latest_github_release_version", lambda _repo: "2.0.0")
+    monkeypatch.setattr(anvil_launcher, "_anvil_version_matches", lambda _path, _version: False)
+    monkeypatch.setattr(
+        anvil_launcher,
+        "_download_anvil",
+        lambda _version: (_ for _ in ()).throw(anvil_launcher.AnvilInstallError("network down")),
+    )
+
+    resolved = anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
+
+    assert resolved == local
+
+
+def test_contract4_errors_when_nothing_reachable_and_no_local_binary(monkeypatch, tmp_path) -> None:
+    """No reachable release and no local binary is the only case that errors."""
+    cache_root = tmp_path / "cache"
+    monkeypatch.setattr(anvil_launcher.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("brokk_code.anvil_launcher.get_global_cache_dir", lambda: cache_root)
+    monkeypatch.setattr(anvil_launcher, "_anvil_triple", lambda _version: "fake-triple")
+    monkeypatch.setattr(
+        anvil_launcher,
+        "latest_github_release_version",
+        lambda _repo: (_ for _ in ()).throw(anvil_launcher.ReleaseResolverError("offline")),
+    )
+
+    with pytest.raises(anvil_launcher.AnvilInstallError):
+        anvil_launcher.resolve_anvil_binary(override=None, prefer_local=True)
 
 
 def test_resolve_anvil_binary_redownloads_invalid_cached_binary(monkeypatch, tmp_path) -> None:

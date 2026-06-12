@@ -9,7 +9,9 @@ For the `brokk mcp` MCP subcommand, `resolve_bifrost_binary` prefers (in
 order): explicit override, an entry on `$PATH` whose `--version` output matches
 the requested release, then a downloaded-and-cached release binary for that same
 version. When no version is provided, Brokk resolves the latest GitHub release
-dynamically. Cached binaries live under
+dynamically so newer releases are applied automatically; if that lookup or the
+download fails (e.g. offline) Brokk falls back to any already-installed local
+binary instead of erroring. Cached binaries live under
 `get_global_cache_dir() / "bifrost" / <version>`. A `$PATH` binary whose version
 does not match (or does not respond to `--version`) is skipped and the
 requested release is used instead.
@@ -101,21 +103,34 @@ def resolve_bifrost_binary(
 ) -> Path:
     """Resolve the bifrost binary path.
 
-    Order: override > matching $PATH > cached release > download release.
-    When ``version`` is omitted, Brokk resolves the latest GitHub release dynamically
-    unless ``prefer_local`` is true, in which case any local install/cache is reused
-    before Brokk attempts network resolution.
+    Order: override > matching $PATH > matching cached release > download release.
+    When ``version`` is omitted, Brokk always checks GitHub for the latest release so
+    newer versions are applied automatically (auto-update). ``prefer_local`` enables
+    graceful degradation: if the latest-release lookup or the download fails (e.g.
+    offline), Brokk falls back to any already-installed local binary instead of
+    erroring. Brokk only errors when no version can be resolved/downloaded *and* no
+    local binary is present.
     """
     if override is not None:
         return _validate_existing_file(override, "bifrost")
 
     normalized_version = (version or "").strip().removeprefix("v")
-    if prefer_local and not normalized_version:
-        local_binary = _find_local_bifrost_binary()
-        if local_binary is not None:
-            return local_binary
 
-    resolved_version = _resolve_bifrost_version(normalized_version or None)
+    # Always resolve the target version first so a newer release is picked up. When
+    # no explicit version was requested this hits GitHub; if that fails (offline),
+    # degrade to a local binary rather than blocking startup.
+    try:
+        resolved_version = _resolve_bifrost_version(normalized_version or None)
+    except BifrostInstallError:
+        if prefer_local and not normalized_version:
+            local_binary = _find_local_bifrost_binary()
+            if local_binary is not None:
+                logger.info(
+                    "Could not resolve latest bifrost release; using local binary at %s",
+                    local_binary,
+                )
+                return local_binary
+        raise
 
     on_path = shutil.which("bifrost")
     if on_path:
@@ -132,7 +147,21 @@ def resolve_bifrost_binary(
     if binary_path.exists() and os.access(binary_path, os.X_OK):
         return binary_path
 
-    return _download_bifrost(resolved_version)
+    # No local binary matches the target version, so download it. If the download
+    # fails but a local binary exists, degrade gracefully to it instead of erroring.
+    try:
+        return _download_bifrost(resolved_version)
+    except BifrostInstallError:
+        if prefer_local:
+            local_binary = _find_local_bifrost_binary()
+            if local_binary is not None:
+                logger.warning(
+                    "Failed to download bifrost %s; falling back to local binary at %s",
+                    resolved_version,
+                    local_binary,
+                )
+                return local_binary
+        raise
 
 
 def _resolve_bifrost_version(version: str | None) -> str:

@@ -67,6 +67,7 @@ class HeadlessAcpClient:
             resolve_anvil_binary,
             version=self.anvil_version,
             override=self.anvil_binary,
+            prefer_local=self.anvil_version is None,
         )
         args: list[str] = ["--transient-setup"]
         if self.default_model:
