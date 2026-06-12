@@ -242,35 +242,30 @@ uvx brokk issue solve \
 GitHub authentication is handled by GitHub tooling such as `gh`. `brokk-cli`
 does not accept or forward GitHub credentials.
 
-### Anvil Scripting Configuration
+### Valkyrie Automation
 
-The first interactive run of a headless repository command opens Anvil
-scripting configuration. You can also run it explicitly:
+Headless repository automation is delegated to Valkyrie. Brokk keeps legacy
+entry points such as `exec`, `issue`, `pr`, and `commit` as compatibility
+wrappers, but Valkyrie owns the automation workflow and run records.
 
-```bash
-uvx brokk anvil-config
-```
-
-Brokk starts Anvil, reads its ACP `configOptions`, and presents the real
-`model_selection` and `reasoning_effort` choices exposed by Anvil. The saved
-JSON configuration can use one model/reasoning setting for every scripting
-command or separate settings per command.
-
-Inspect or reset the saved configuration:
+You can also call Valkyrie directly through Brokk with the `vk` binary interface:
 
 ```bash
-uvx brokk anvil-config --show
-uvx brokk anvil-config --reset
+uvx brokk vk issue 123 --plan
+uvx brokk vk run "fix the parser panic" --write
 ```
 
-`--model <id>` and `--reasoning-effort <level>` remain available on headless
-commands as one-off overrides.
+Brokk resolves `vk` from `--vk-binary`, `VK_BINARY`, `PATH`, a debug binary
+under `~/code/valkyrie`, or a local `cargo run --bin vk` fallback for that
+checkout. The older `--valkyrie-binary` option remains accepted for
+compatibility.
 
 Common runtime options:
 
 - `--worktree`: run the command in an isolated git worktree when applicable.
 - `--anvil-binary <path>`: use a specific Anvil binary.
 - `--anvil-version <version>`: use a specific Anvil release version.
+- `--vk-binary <path>`: use a specific `vk` binary.
 
 ## Development
 
