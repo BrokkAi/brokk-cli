@@ -1,7 +1,6 @@
 # Brokk Code
 
-Python CLI tooling for Brokk editor integrations, ACP/MCP servers, and
-Anvil-backed repository automation.
+Python CLI tooling for Brokk editor integrations and ACP/MCP server passthrough wrappers.
 
 The published command is `brokk`. For normal use, run it through `uvx` so the
 latest published package is resolved automatically:
@@ -16,7 +15,6 @@ Local development still uses `uv run`; see [Development](#development).
 
 - `uv`/`uvx` for normal user-facing commands and generated editor configs.
 - Python 3.11+ for local development.
-- `gh` authenticated for GitHub issue and pull-request automation.
 - `curl` on Unix-like systems if Brokk needs to bootstrap `uv`.
 
 ACP mode launches Anvil and does not use the Java executor. MCP mode launches
@@ -51,10 +49,10 @@ Install the local Codex plugin entry:
 uvx brokk install codex-plugin
 ```
 
-Installers write client configuration only. They do not configure GitHub auth,
-do not require a Brokk API key, and do not warm Anvil or Bifrost runtime
-dependencies. Where supported, generated config launches Brokk as
-`uvx brokk ...` so clients resolve the current package at runtime.
+Installers write client configuration only. They do not require a Brokk API key
+and do not warm Anvil or Bifrost runtime dependencies. Where supported,
+generated config launches Brokk as `uvx brokk ...` so clients resolve the
+current package at runtime.
 
 Use `--force` to replace an existing generated integration entry when the
 installer supports it.
@@ -200,78 +198,6 @@ In this mode `brokk-acp` and `bifrost` must already be installed and available
 on the editor's inherited `PATH`. Use `--brokk-acp-binary <path>` to write an
 explicit `brokk-acp` path.
 
-## Headless Repository Commands
-
-These commands run through Anvil ACP and are intended for non-interactive
-automation:
-
-```bash
-uvx brokk exec "Find the likely cause of the failing test"
-uvx brokk commit
-uvx brokk commit "Fix startup race"
-```
-
-Pull request commands:
-
-```bash
-uvx brokk pr create --title "Fix startup race" --body "See commits."
-uvx brokk pr review \
-  --pr-number 123 \
-  --repo-owner acme \
-  --repo-name service
-```
-
-GitHub issue commands:
-
-```bash
-uvx brokk issue create "Report the flaky checkout failure" \
-  --repo-owner acme \
-  --repo-name service
-
-uvx brokk issue diagnose \
-  --issue-number 123 \
-  --repo-owner acme \
-  --repo-name service
-
-uvx brokk issue solve \
-  --issue-number 123 \
-  --repo-owner acme \
-  --repo-name service
-```
-
-GitHub authentication is handled by GitHub tooling such as `gh`. `brokk-cli`
-does not accept or forward GitHub credentials.
-
-### Anvil Scripting Configuration
-
-The first interactive run of a headless repository command opens Anvil
-scripting configuration. You can also run it explicitly:
-
-```bash
-uvx brokk anvil-config
-```
-
-Brokk starts Anvil, reads its ACP `configOptions`, and presents the real
-`model_selection` and `reasoning_effort` choices exposed by Anvil. The saved
-JSON configuration can use one model/reasoning setting for every scripting
-command or separate settings per command.
-
-Inspect or reset the saved configuration:
-
-```bash
-uvx brokk anvil-config --show
-uvx brokk anvil-config --reset
-```
-
-`--model <id>` and `--reasoning-effort <level>` remain available on headless
-commands as one-off overrides.
-
-Common runtime options:
-
-- `--worktree`: run the command in an isolated git worktree when applicable.
-- `--anvil-binary <path>`: use a specific Anvil binary.
-- `--anvil-version <version>`: use a specific Anvil release version.
-
 ## Development
 
 Clone the repo and create the managed environment:
@@ -291,9 +217,13 @@ Run tests and linting:
 
 ```bash
 uv run pytest
-uv run ruff check .
-uv run ruff format --check .
+uvx ruff check .
+uvx ruff format --check .
 ```
+
+Ruff is intentionally not part of the project dev dependency group, so Termux
+users can run tests without building Ruff from source. Use `uvx ruff ...` when
+you want linting or formatting checks locally.
 
 When changing code, keep generated repository content in English and follow the
 project guidance in [AGENTS.md](AGENTS.md) and

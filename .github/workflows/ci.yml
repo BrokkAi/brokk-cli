@@ -32,10 +32,10 @@ jobs:
         run: uv sync --group dev
 
       - name: Ruff lint
-        run: uv run ruff check
+        run: uvx ruff check
 
       - name: Ruff format check
-        run: uv run ruff format --check
+        run: uvx ruff format --check
 
       - name: Pytest
         run: uv run pytest -q -n auto --no-header
