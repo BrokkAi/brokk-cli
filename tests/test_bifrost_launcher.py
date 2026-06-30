@@ -60,7 +60,35 @@ def test_run_bifrost_server_prefers_local_binary_when_version_omitted(
     with pytest.raises(RuntimeError, match="stop"):
         bifrost_launcher.run_bifrost_server(workspace_dir=tmp_path)
 
-    assert captured["resolve_kwargs"] == {"override": None, "prefer_local": True}
+    assert captured["resolve_kwargs"] == {"version": None, "override": None, "prefer_local": True}
+
+
+def test_run_bifrost_server_uses_explicit_version_without_local_fallback(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, object] = {}
+
+    binary = tmp_path / "bifrost"
+    binary.write_text("stub")
+    binary.chmod(0o755)
+
+    def fake_resolve(**kwargs: object) -> Path:
+        captured["resolve_kwargs"] = kwargs
+        return binary
+
+    monkeypatch.setattr(bifrost_launcher, "resolve_bifrost_binary", fake_resolve)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "chdir", lambda _p: None)
+    monkeypatch.setattr(os, "execvpe", lambda *_a: (_ for _ in ()).throw(RuntimeError("stop")))
+
+    with pytest.raises(RuntimeError, match="stop"):
+        bifrost_launcher.run_bifrost_server(workspace_dir=tmp_path, version="0.7.1")
+
+    assert captured["resolve_kwargs"] == {
+        "version": "0.7.1",
+        "override": None,
+        "prefer_local": False,
+    }
 
 
 def test_run_bifrost_server_forwards_passthrough_args(monkeypatch, tmp_path) -> None:
@@ -109,14 +137,13 @@ def test_resolve_bifrost_binary_prefers_override(tmp_path) -> None:
     assert resolved == binary
 
 
-def test_resolve_bifrost_binary_uses_latest_release_when_version_omitted(
+def test_resolve_bifrost_binary_uses_pinned_release_when_version_omitted(
     monkeypatch, tmp_path
 ) -> None:
     resolved_binary = tmp_path / "downloaded-bifrost"
     resolved_binary.write_text("")
 
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(rust_acp_install, "latest_github_release_version", lambda _repo: "6.6.6")
 
     captured: dict[str, str] = {}
 
@@ -129,21 +156,24 @@ def test_resolve_bifrost_binary_uses_latest_release_when_version_omitted(
     resolved = rust_acp_install.resolve_bifrost_binary(override=None)
 
     assert resolved == resolved_binary
-    assert captured["version"] == "6.6.6"
+    assert captured["version"] == rust_acp_install._BIFROST_PINNED_VERSION
+    assert captured["version"] == "0.6.8"
 
 
 # ---------------------------------------------------------------------------
-# Auto-update contract (mirrors test_anvil_launcher.py). `brokk mcp` resolves
-# bifrost with prefer_local=True and no explicit version:
-#   1. newer release available  -> update downloaded and used
-#   2. no newer release          -> existing local binary used, nothing downloaded
-#   3. version check / download fails (offline) -> degrade to local binary, no error
-#   4. nothing reachable AND no local binary    -> error
+# Pinning contract. `brokk mcp` resolves bifrost with prefer_local=True and no
+# explicit version:
+#   1. pinned release not local  -> pinned release downloaded and used
+#   2. pinned release local      -> existing local binary used, nothing downloaded
+#   3. pinned download fails (offline) -> degrade to local binary, no error
+#   4. nothing reachable AND no local binary -> error
 # ---------------------------------------------------------------------------
 
 
-def test_contract1_downloads_update_when_newer_release_available(monkeypatch, tmp_path) -> None:
-    """A newer release than the locally-installed binary triggers a download."""
+def test_contract1_downloads_pinned_release_when_local_binary_mismatches(
+    monkeypatch, tmp_path
+) -> None:
+    """A local binary that does not match the pinned release triggers a download."""
     stale_local = tmp_path / "stale" / "bifrost"
     stale_local.parent.mkdir()
     stale_local.write_text("old")
@@ -155,7 +185,6 @@ def test_contract1_downloads_update_when_newer_release_available(monkeypatch, tm
     downloaded.chmod(0o755)
 
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: str(stale_local))
-    monkeypatch.setattr(rust_acp_install, "latest_github_release_version", lambda _repo: "2.0.0")
     monkeypatch.setattr(rust_acp_install, "_bifrost_version_matches", lambda _path, _version: False)
     # No cached binary for the resolved version.
     monkeypatch.setattr(
@@ -173,17 +202,16 @@ def test_contract1_downloads_update_when_newer_release_available(monkeypatch, tm
     resolved = rust_acp_install.resolve_bifrost_binary(override=None, prefer_local=True)
 
     assert resolved == downloaded
-    assert captured["version"] == "2.0.0"
+    assert captured["version"] == rust_acp_install._BIFROST_PINNED_VERSION
 
 
-def test_contract2_uses_local_when_no_newer_release(monkeypatch, tmp_path) -> None:
-    """When the local binary already matches the latest release, nothing is downloaded."""
+def test_contract2_uses_local_when_it_matches_pinned_release(monkeypatch, tmp_path) -> None:
+    """When the local binary already matches the pinned release, nothing is downloaded."""
     local = tmp_path / "bifrost"
     local.write_text("current")
     local.chmod(0o755)
 
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: str(local))
-    monkeypatch.setattr(rust_acp_install, "latest_github_release_version", lambda _repo: "2.0.0")
     monkeypatch.setattr(rust_acp_install, "_bifrost_version_matches", lambda _path, _version: True)
     monkeypatch.setattr(
         rust_acp_install,
@@ -196,18 +224,24 @@ def test_contract2_uses_local_when_no_newer_release(monkeypatch, tmp_path) -> No
     assert resolved == local
 
 
-def test_contract3_falls_back_to_path_binary_when_release_check_fails(
+def test_contract3_falls_back_to_path_binary_when_pinned_download_fails(
     monkeypatch, tmp_path
 ) -> None:
-    """Network/version-check failure degrades to the local $PATH binary, no error."""
+    """Pinned download failure degrades to the local $PATH binary, no error."""
     found = tmp_path / "bifrost"
     found.write_text("")
 
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: str(found))
+    monkeypatch.setattr(rust_acp_install, "_bifrost_version_matches", lambda _path, _version: False)
+    monkeypatch.setattr(
+        rust_acp_install, "_bifrost_cache_binary_path", lambda _version: tmp_path / "missing"
+    )
     monkeypatch.setattr(
         rust_acp_install,
-        "latest_github_release_version",
-        lambda _repo: (_ for _ in ()).throw(rust_acp_install.ReleaseResolverError("offline")),
+        "_download_bifrost",
+        lambda _version: (_ for _ in ()).throw(
+            rust_acp_install.BifrostInstallError("network down")
+        ),
     )
 
     resolved = rust_acp_install.resolve_bifrost_binary(override=None, prefer_local=True)
@@ -215,18 +249,25 @@ def test_contract3_falls_back_to_path_binary_when_release_check_fails(
     assert resolved == found
 
 
-def test_contract3_falls_back_to_latest_cached_binary_when_release_check_fails(
+def test_contract3_falls_back_to_latest_cached_binary_when_pinned_download_fails(
     monkeypatch, tmp_path
 ) -> None:
-    """With no $PATH binary, an offline run degrades to the newest cached binary."""
+    """With no $PATH binary, offline startup degrades to the newest cached binary."""
     cache_root = tmp_path / "cache"
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: None)
     monkeypatch.setattr("brokk_code.rust_acp_install.get_global_cache_dir", lambda: cache_root)
     monkeypatch.setattr(rust_acp_install, "_bifrost_triple", lambda _version: "fake-triple")
     monkeypatch.setattr(
         rust_acp_install,
-        "latest_github_release_version",
-        lambda _repo: (_ for _ in ()).throw(rust_acp_install.ReleaseResolverError("offline")),
+        "_bifrost_cache_binary_path",
+        lambda _version: cache_root / "bifrost" / _version / "fake-triple" / "bifrost",
+    )
+    monkeypatch.setattr(
+        rust_acp_install,
+        "_download_bifrost",
+        lambda _version: (_ for _ in ()).throw(
+            rust_acp_install.BifrostInstallError("network down")
+        ),
     )
 
     binary_name = rust_acp_install._bifrost_binary_filename()
@@ -247,13 +288,12 @@ def test_contract3_falls_back_to_latest_cached_binary_when_release_check_fails(
 
 
 def test_contract3_falls_back_to_local_when_download_fails(monkeypatch, tmp_path) -> None:
-    """A failed download of a newer release degrades to the existing local binary."""
+    """A failed download of the pinned release degrades to the existing local binary."""
     local = tmp_path / "bifrost"
     local.write_text("old")
     local.chmod(0o755)
 
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: str(local))
-    monkeypatch.setattr(rust_acp_install, "latest_github_release_version", lambda _repo: "2.0.0")
     monkeypatch.setattr(rust_acp_install, "_bifrost_version_matches", lambda _path, _version: False)
     monkeypatch.setattr(
         rust_acp_install, "_bifrost_cache_binary_path", lambda _version: tmp_path / "missing"
@@ -272,15 +312,17 @@ def test_contract3_falls_back_to_local_when_download_fails(monkeypatch, tmp_path
 
 
 def test_contract4_errors_when_nothing_reachable_and_no_local_binary(monkeypatch, tmp_path) -> None:
-    """No reachable release and no local binary is the only case that errors."""
+    """No reachable pinned download and no local binary is the only case that errors."""
     cache_root = tmp_path / "cache"
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: None)
     monkeypatch.setattr("brokk_code.rust_acp_install.get_global_cache_dir", lambda: cache_root)
     monkeypatch.setattr(rust_acp_install, "_bifrost_triple", lambda _version: "fake-triple")
     monkeypatch.setattr(
         rust_acp_install,
-        "latest_github_release_version",
-        lambda _repo: (_ for _ in ()).throw(rust_acp_install.ReleaseResolverError("offline")),
+        "_download_bifrost",
+        lambda _version: (_ for _ in ()).throw(
+            rust_acp_install.BifrostInstallError("network down")
+        ),
     )
 
     with pytest.raises(rust_acp_install.BifrostInstallError):
@@ -291,7 +333,6 @@ def test_resolve_bifrost_binary_uses_path_when_available(monkeypatch, tmp_path) 
     found = tmp_path / "bifrost"
     found.write_text("")
     monkeypatch.setattr(rust_acp_install.shutil, "which", lambda _name: str(found))
-    monkeypatch.setattr(rust_acp_install, "latest_github_release_version", lambda _repo: "6.6.6")
     monkeypatch.setattr(
         rust_acp_install,
         "_bifrost_version_matches",

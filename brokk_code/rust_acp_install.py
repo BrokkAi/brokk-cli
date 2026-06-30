@@ -8,10 +8,10 @@ on the editor inheriting a PATH that finds them at agent-launch time. Pass
 For the `brokk mcp` MCP subcommand, `resolve_bifrost_binary` prefers (in
 order): explicit override, an entry on `$PATH` whose `--version` output matches
 the requested release, then a downloaded-and-cached release binary for that same
-version. When no version is provided, Brokk resolves the latest GitHub release
-dynamically so newer releases are applied automatically; if that lookup or the
-download fails (e.g. offline) Brokk falls back to any already-installed local
-binary instead of erroring. Cached binaries live under
+version. When no version is provided, Brokk uses the pinned Bifrost release
+rather than dynamically resolving GitHub's latest release. The pin tracks the
+latest known-good release and can be bumped after downstream-breaking releases
+are fixed. Cached binaries live under
 `get_global_cache_dir() / "bifrost" / <version>`. A `$PATH` binary whose version
 does not match (or does not respond to `--version`) is skipped and the
 requested release is used instead.
@@ -38,16 +38,15 @@ from pathlib import Path
 
 import httpx
 
-from brokk_code.release_resolver import ReleaseResolverError, latest_github_release_version
 from brokk_code.settings import get_global_cache_dir
 
 logger = logging.getLogger(__name__)
 
-_BIFROST_GITHUB_REPO = "BrokkAi/bifrost"
 _BIFROST_RELEASE_URL = "https://github.com/BrokkAi/bifrost/releases/download"
 _BIFROST_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 _BIFROST_LOCK_TIMEOUT_SECONDS = 600.0
 _BIFROST_VERSION_PROBE_TIMEOUT_SECONDS = 5.0
+_BIFROST_PINNED_VERSION = "0.6.8"
 
 
 class RustAcpInstallError(Exception):
@@ -104,33 +103,20 @@ def resolve_bifrost_binary(
     """Resolve the bifrost binary path.
 
     Order: override > matching $PATH > matching cached release > download release.
-    When ``version`` is omitted, Brokk always checks GitHub for the latest release so
-    newer versions are applied automatically (auto-update). ``prefer_local`` enables
-    graceful degradation: if the latest-release lookup or the download fails (e.g.
+    When ``version`` is omitted, Brokk uses the pinned Bifrost release rather than
+    auto-updating to GitHub's latest release. The pin tracks the latest known-good
+    release and should be bumped after downstream-breaking releases are fixed.
+    ``prefer_local`` enables graceful degradation: if the pinned download fails (e.g.
     offline), Brokk falls back to any already-installed local binary instead of
-    erroring. Brokk only errors when no version can be resolved/downloaded *and* no
-    local binary is present.
+    erroring. Brokk only errors when the requested version cannot be downloaded *and*
+    no local binary is present.
     """
     if override is not None:
         return _validate_existing_file(override, "bifrost")
 
     normalized_version = (version or "").strip().removeprefix("v")
 
-    # Always resolve the target version first so a newer release is picked up. When
-    # no explicit version was requested this hits GitHub; if that fails (offline),
-    # degrade to a local binary rather than blocking startup.
-    try:
-        resolved_version = _resolve_bifrost_version(normalized_version or None)
-    except BifrostInstallError:
-        if prefer_local and not normalized_version:
-            local_binary = _find_local_bifrost_binary()
-            if local_binary is not None:
-                logger.info(
-                    "Could not resolve latest bifrost release; using local binary at %s",
-                    local_binary,
-                )
-                return local_binary
-        raise
+    resolved_version = _resolve_bifrost_version(normalized_version or None)
 
     on_path = shutil.which("bifrost")
     if on_path:
@@ -168,11 +154,7 @@ def _resolve_bifrost_version(version: str | None) -> str:
     normalized_version = (version or "").strip().removeprefix("v")
     if normalized_version:
         return normalized_version
-
-    try:
-        return latest_github_release_version(_BIFROST_GITHUB_REPO)
-    except ReleaseResolverError as exc:
-        raise BifrostInstallError(f"Failed to resolve latest bifrost release: {exc}") from exc
+    return _BIFROST_PINNED_VERSION
 
 
 def _find_local_bifrost_binary() -> Path | None:

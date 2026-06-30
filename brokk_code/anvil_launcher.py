@@ -19,17 +19,16 @@ from pathlib import Path
 
 import httpx
 
-from brokk_code.release_resolver import ReleaseResolverError, latest_github_release_version
 from brokk_code.settings import get_global_cache_dir
 from brokk_code.workspace import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
-_ANVIL_GITHUB_REPO = "BrokkAi/anvil"
 _ANVIL_RELEASE_URL = "https://github.com/BrokkAi/anvil/releases/download"
 _ANVIL_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 _ANVIL_LOCK_TIMEOUT_SECONDS = 600.0
 _ANVIL_VERSION_PROBE_TIMEOUT_SECONDS = 5.0
+_ANVIL_PINNED_VERSION = "0.17.0"
 
 
 class AnvilInstallError(Exception):
@@ -98,33 +97,20 @@ def resolve_anvil_binary(
     """Resolve the Anvil binary path.
 
     Order: override > matching $PATH binary > matching cached release > downloaded
-    release. When ``version`` is omitted, Brokk always checks GitHub for the latest
-    release so newer versions are applied automatically (auto-update). ``prefer_local``
-    enables graceful degradation: if the latest-release lookup or the download fails
-    (e.g. offline), Brokk falls back to any already-installed local binary instead of
-    erroring. Brokk only errors when no version can be resolved/downloaded *and* no
-    local binary is present.
+    release. When ``version`` is omitted, Brokk uses the pinned Anvil release rather
+    than auto-updating to GitHub's latest release. The pin tracks the latest known-good
+    release and should be bumped after newer releases are validated. ``prefer_local``
+    enables graceful degradation: if the pinned download fails (e.g. offline), Brokk
+    falls back to any already-installed local binary instead of erroring. Brokk only
+    errors when the requested version cannot be downloaded *and* no local binary is
+    present.
     """
     if override is not None:
         return _validate_existing_file(override, "anvil")
 
     normalized_version = (version or "").strip().removeprefix("v")
 
-    # Always resolve the target version first so a newer release is picked up. When
-    # no explicit version was requested this hits GitHub; if that fails (offline),
-    # degrade to a local binary rather than blocking startup.
-    try:
-        resolved_version = _resolve_anvil_version(normalized_version or None)
-    except AnvilInstallError:
-        if prefer_local and not normalized_version:
-            local_binary = _find_local_anvil_binary()
-            if local_binary is not None:
-                logger.info(
-                    "Could not resolve latest Anvil release; using local binary at %s",
-                    local_binary,
-                )
-                return local_binary
-        raise
+    resolved_version = _resolve_anvil_version(normalized_version or None)
 
     on_path = shutil.which("anvil")
     if on_path:
@@ -168,11 +154,7 @@ def _resolve_anvil_version(version: str | None) -> str:
     normalized_version = (version or "").strip().removeprefix("v")
     if normalized_version:
         return normalized_version
-
-    try:
-        return latest_github_release_version(_ANVIL_GITHUB_REPO)
-    except ReleaseResolverError as exc:
-        raise AnvilInstallError(f"Failed to resolve latest Anvil release: {exc}") from exc
+    return _ANVIL_PINNED_VERSION
 
 
 def _find_local_anvil_binary() -> Path | None:

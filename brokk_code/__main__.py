@@ -54,7 +54,13 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--anvil-version",
         type=str,
         default=None,
-        help="Anvil version to use when downloading for ACP passthrough commands",
+        help="Anvil version to use instead of the pinned release for ACP passthrough commands",
+    )
+    parser.add_argument(
+        "--bifrost-version",
+        type=str,
+        default=None,
+        help="Bifrost version to use instead of the pinned release for MCP passthrough commands",
     )
 
 
@@ -71,7 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser(
         "mcp",
-        help="Run the bifrost MCP server (downloads the latest release on first use)",
+        help="Run the bifrost MCP server (downloads the pinned release on first use)",
         add_help=False,
     )
 
@@ -153,11 +159,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _passthrough_command_from_argv(argv: list[str]) -> tuple[str, list[str]] | None:
-    """Return passthrough command and args without argparse consuming root flags."""
-    root_options_with_values = {"--anvil-binary", "--anvil-version"}
+def _passthrough_command_from_argv(
+    argv: list[str],
+) -> tuple[argparse.Namespace, list[str]] | None:
+    """Return passthrough command args with root runtime overrides consumed.
+
+    Only options before the passthrough subcommand are treated as Brokk globals.
+    The subcommand tail remains an exact passthrough to Anvil/Bifrost, so e.g.
+    `brokk mcp --bifrost-version 0.7.1` still forwards `--bifrost-version` to
+    Bifrost while `brokk --bifrost-version 0.7.1 mcp` selects that Bifrost binary.
+    """
+    root_options_with_values = {
+        "--anvil-binary": "anvil_binary",
+        "--anvil-version": "anvil_version",
+        "--bifrost-version": "bifrost_version",
+    }
     root_flags = {"--worktree"}
     help_flags = {"-h", "--help"}
+    runtime_args = argparse.Namespace(
+        command=None,
+        worktree=False,
+        anvil_binary=None,
+        anvil_version=None,
+        bifrost_version=None,
+    )
 
     index = 0
     while index < len(argv):
@@ -168,12 +193,25 @@ def _passthrough_command_from_argv(argv: list[str]) -> tuple[str, list[str]] | N
             index += 1
             break
         if token in root_flags:
+            runtime_args.worktree = True
             index += 1
             continue
         if token in root_options_with_values:
+            if index + 1 >= len(argv):
+                return None
+            value = argv[index + 1]
+            attr = root_options_with_values[token]
+            setattr(runtime_args, attr, Path(value) if attr == "anvil_binary" else value)
             index += 2
             continue
-        if any(token.startswith(f"{option}=") for option in root_options_with_values):
+        matched_option = next(
+            (option for option in root_options_with_values if token.startswith(f"{option}=")),
+            None,
+        )
+        if matched_option is not None:
+            value = token.split("=", 1)[1]
+            attr = root_options_with_values[matched_option]
+            setattr(runtime_args, attr, Path(value) if attr == "anvil_binary" else value)
             index += 1
             continue
         break
@@ -185,15 +223,15 @@ def _passthrough_command_from_argv(argv: list[str]) -> tuple[str, list[str]] | N
     if command not in {"acp", "mcp"}:
         return None
 
-    return command, [*argv[:index], *argv[index + 1 :]]
+    runtime_args.command = command
+    return runtime_args, argv[index + 1 :]
 
 
 def main() -> None:
     raw_args = sys.argv[1:]
     passthrough_command = _passthrough_command_from_argv(raw_args)
     if passthrough_command is not None:
-        command, passthrough_args = passthrough_command
-        args = argparse.Namespace(command=command)
+        args, passthrough_args = passthrough_command
         _main_dispatch(args, Path.cwd().resolve(), passthrough_args)
         return
 
@@ -402,6 +440,8 @@ def _main_dispatch(
     if args.command == "acp":
         run_anvil_acp_server(
             workspace_dir=workspace_path,
+            binary_override=args.anvil_binary,
+            version=args.anvil_version,
             passthrough_args=unknown,
         )
         return
@@ -411,6 +451,7 @@ def _main_dispatch(
 
         run_bifrost_server(
             workspace_dir=workspace_path,
+            version=args.bifrost_version,
             passthrough_args=unknown,
         )
         return
