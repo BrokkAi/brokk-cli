@@ -216,6 +216,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 .brokk
+.bifrost/
 
 # Mjolnir linked worktrees
 .mjolnir/worktrees/

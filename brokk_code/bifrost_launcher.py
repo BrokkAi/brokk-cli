@@ -18,6 +18,7 @@ from brokk_code.workspace import resolve_workspace_dir
 def run_bifrost_server(
     *,
     workspace_dir: Path,
+    version: str | None = None,
     passthrough_args: list[str] | None = None,
 ) -> None:
     """Resolve the bifrost binary and exec it with full CLI passthrough.
@@ -29,7 +30,11 @@ def run_bifrost_server(
     resolved_workspace_dir = resolve_workspace_dir(workspace_dir)
 
     try:
-        bifrost_bin = resolve_bifrost_binary(override=None, prefer_local=True)
+        bifrost_bin = resolve_bifrost_binary(
+            version=version,
+            override=None,
+            prefer_local=version is None,
+        )
     except (RustAcpInstallError, BifrostInstallError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
