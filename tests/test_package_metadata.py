@@ -39,7 +39,11 @@ def test_package_metadata_populates_pypi_project_page() -> None:
     classifiers = project["classifiers"]
     assert "Development Status :: 5 - Production/Stable" in classifiers
     assert "Intended Audience :: Developers" in classifiers
-    assert "License :: OSI Approved :: GNU General Public License v3 (GPLv3)" in classifiers
+    # The license is declared via the SPDX ``license`` expression (asserted
+    # above), so no ``License ::`` Trove classifier may be present: PEP 639
+    # forbids pairing a License-Expression with license classifiers and PyPI
+    # rejects such uploads.
+    assert not any(c.startswith("License ::") for c in classifiers)
     assert "Programming Language :: Python :: 3.11" in classifiers
     assert "Programming Language :: Python :: 3.12" in classifiers
     assert "Programming Language :: Python :: 3.13" in classifiers
