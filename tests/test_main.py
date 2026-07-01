@@ -3,38 +3,38 @@ from brokk_code import __main__ as brokk_main
 
 def test_passthrough_parser_consumes_global_bifrost_version() -> None:
     parsed = brokk_main._passthrough_command_from_argv(
-        ["--bifrost-version", "0.7.1", "mcp", "--server", "searchtools"]
+        ["--bifrost-version", "0.7.2", "mcp", "--server", "searchtools"]
     )
 
     assert parsed is not None
     args, passthrough_args = parsed
     assert args.command == "mcp"
-    assert args.bifrost_version == "0.7.1"
+    assert args.bifrost_version == "0.7.2"
     assert passthrough_args == ["--server", "searchtools"]
 
 
 def test_passthrough_parser_consumes_equals_form_global_bifrost_version() -> None:
     parsed = brokk_main._passthrough_command_from_argv(
-        ["--bifrost-version=0.7.1", "mcp", "--server", "searchtools"]
+        ["--bifrost-version=0.7.2", "mcp", "--server", "searchtools"]
     )
 
     assert parsed is not None
     args, passthrough_args = parsed
     assert args.command == "mcp"
-    assert args.bifrost_version == "0.7.1"
+    assert args.bifrost_version == "0.7.2"
     assert passthrough_args == ["--server", "searchtools"]
 
 
 def test_passthrough_parser_leaves_subcommand_bifrost_version_as_passthrough() -> None:
     parsed = brokk_main._passthrough_command_from_argv(
-        ["mcp", "--bifrost-version", "0.7.1", "--server", "searchtools"]
+        ["mcp", "--bifrost-version", "0.7.2", "--server", "searchtools"]
     )
 
     assert parsed is not None
     args, passthrough_args = parsed
     assert args.command == "mcp"
     assert args.bifrost_version is None
-    assert passthrough_args == ["--bifrost-version", "0.7.1", "--server", "searchtools"]
+    assert passthrough_args == ["--bifrost-version", "0.7.2", "--server", "searchtools"]
 
 
 def test_passthrough_parser_consumes_global_anvil_runtime_options(tmp_path) -> None:
@@ -68,12 +68,12 @@ def test_main_dispatch_passes_bifrost_version_to_mcp(monkeypatch, tmp_path) -> N
 
     monkeypatch.setattr(bifrost_launcher, "run_bifrost_server", fake_run_bifrost_server)
 
-    args = brokk_main.argparse.Namespace(command="mcp", bifrost_version="0.7.1")
+    args = brokk_main.argparse.Namespace(command="mcp", bifrost_version="0.7.2")
     brokk_main._main_dispatch(args, tmp_path, ["--server", "searchtools"])
 
     assert captured == {
         "workspace_dir": tmp_path,
-        "version": "0.7.1",
+        "version": "0.7.2",
         "passthrough_args": ["--server", "searchtools"],
     }
 
