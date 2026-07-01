@@ -82,10 +82,10 @@ def test_run_bifrost_server_uses_explicit_version_without_local_fallback(
     monkeypatch.setattr(os, "execvpe", lambda *_a: (_ for _ in ()).throw(RuntimeError("stop")))
 
     with pytest.raises(RuntimeError, match="stop"):
-        bifrost_launcher.run_bifrost_server(workspace_dir=tmp_path, version="0.7.1")
+        bifrost_launcher.run_bifrost_server(workspace_dir=tmp_path, version="0.7.2")
 
     assert captured["resolve_kwargs"] == {
-        "version": "0.7.1",
+        "version": "0.7.2",
         "override": None,
         "prefer_local": False,
     }
@@ -157,7 +157,7 @@ def test_resolve_bifrost_binary_uses_pinned_release_when_version_omitted(
 
     assert resolved == resolved_binary
     assert captured["version"] == rust_acp_install._BIFROST_PINNED_VERSION
-    assert captured["version"] == "0.6.8"
+    assert captured["version"] == "0.7.2"
 
 
 # ---------------------------------------------------------------------------

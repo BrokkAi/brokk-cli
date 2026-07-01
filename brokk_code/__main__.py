@@ -166,8 +166,8 @@ def _passthrough_command_from_argv(
 
     Only options before the passthrough subcommand are treated as Brokk globals.
     The subcommand tail remains an exact passthrough to Anvil/Bifrost, so e.g.
-    `brokk mcp --bifrost-version 0.7.1` still forwards `--bifrost-version` to
-    Bifrost while `brokk --bifrost-version 0.7.1 mcp` selects that Bifrost binary.
+    `brokk mcp --bifrost-version 0.7.2` still forwards `--bifrost-version` to
+    Bifrost while `brokk --bifrost-version 0.7.2 mcp` selects that Bifrost binary.
     """
     root_options_with_values = {
         "--anvil-binary": "anvil_binary",
