@@ -157,7 +157,7 @@ def test_resolve_bifrost_binary_uses_pinned_release_when_version_omitted(
 
     assert resolved == resolved_binary
     assert captured["version"] == rust_acp_install._BIFROST_PINNED_VERSION
-    assert captured["version"] == "0.7.2"
+    assert captured["version"] == "0.7.4"
 
 
 # ---------------------------------------------------------------------------
