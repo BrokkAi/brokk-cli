@@ -99,7 +99,7 @@ def test_resolve_anvil_binary_uses_pinned_release_when_version_omitted(
 
     assert resolved == resolved_binary
     assert captured["version"] == anvil_launcher._ANVIL_PINNED_VERSION
-    assert captured["version"] == "0.21.2"
+    assert captured["version"] == "0.21.3"
 
 
 # ---------------------------------------------------------------------------
